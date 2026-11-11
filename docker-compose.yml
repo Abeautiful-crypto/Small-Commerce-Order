@@ -1,0 +1,80 @@
+# 生产编排：app + MySQL 8 + Redis 7。
+# MySQL / Redis 仅加入内部网络、不暴露宿主端口；app 只绑定 127.0.0.1，
+# 由 1Panel / nginx 反向代理并终止 TLS。
+services:
+  app:
+    build:
+      context: .
+      args:
+        GO_IMAGE: "${GO_IMAGE:-golang:1.22-alpine}"
+        RUNTIME_IMAGE: "${RUNTIME_IMAGE:-alpine:3.20}"
+    image: small-commerce-order:${APP_VERSION:-v1.0.0}
+    restart: unless-stopped
+    # 不挂载 env_file：app 容器只需要下列变量，不应接触 MYSQL_ROOT_PASSWORD。
+    environment:
+      APP_ENV: production
+      APP_ADDR: ":8090"
+      APP_STORE: mysql
+      APP_WEB: "./web"
+      APP_MIGRATIONS: "./migrations"
+      APP_MYSQL_DSN: "${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=true&loc=Local"
+      APP_REDIS_ADDR: "redis:6379"
+      APP_REDIS_PASSWORD: "${REDIS_PASSWORD}"
+      APP_CHANNEL_SECRET: "${APP_CHANNEL_SECRET}"
+      APP_PASSWORDS: "${APP_PASSWORDS}"
+    ports:
+      - "127.0.0.1:8090:8090"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE}"
+      MYSQL_USER: "${MYSQL_USER}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend
+
+volumes:
+  mysql-data:
+  redis-data:
+
+networks:
+  backend:
+    driver: bridge

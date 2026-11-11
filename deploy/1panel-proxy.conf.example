@@ -1,0 +1,16 @@
+# 1Panel 反向代理参考片段（不含任何真实地址或凭据）
+# 1Panel：网站 → 创建网站（反向代理）→ 代理地址填 http://127.0.0.1:8090
+# 再在「证书」页申请 Let's Encrypt 并开启强制 HTTPS。
+# 若使用自定义配置，可加入以下 header 透传：
+
+location / {
+    proxy_pass http://127.0.0.1:8090;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 60s;
+}

@@ -1,0 +1,21 @@
+.git
+.github
+.idea
+.agent
+.build
+data
+.playwright-cli
+*.log
+*.tmp
+**/__pycache__/
+*.pyc
+
+# 真实密钥绝不进入构建上下文
+.env
+.env.*
+!.env.example
+
+# 非运行所需
+LICENSE
+README.md
+scripts/
