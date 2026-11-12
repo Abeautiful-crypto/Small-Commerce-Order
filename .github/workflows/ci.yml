@@ -59,7 +59,7 @@ jobs:
   # 3) 部署 + 健康检查 + 五大场景冒烟（仅 main 分支 push 时执行）
   deploy:
     needs: [test, build]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,8 +82,9 @@ jobs:
 
       - name: 健康检查（最多等待 60 秒）
         run: |
+          # 8090 已加固为仅绑定 127.0.0.1（防直连），外部统一走 80 端口 openresty 反代
           for i in $(seq 1 30); do
-            if curl -fsS --max-time 5 http://${{ secrets.DEPLOY_HOST }}:8090/api/meta > /dev/null; then
+            if curl -fsS --max-time 5 http://${{ secrets.DEPLOY_HOST }}/api/meta > /dev/null; then
               echo "服务已就绪（第 $i 次探测）"
               exit 0
             fi
@@ -92,4 +93,4 @@ jobs:
           echo "健康检查超时" && exit 1
 
       - name: 五大场景冒烟验收
-        run: python scripts/acceptance_check.py --base http://${{ secrets.DEPLOY_HOST }}:8090
+        run: python scripts/acceptance_check.py --base http://${{ secrets.DEPLOY_HOST }}
