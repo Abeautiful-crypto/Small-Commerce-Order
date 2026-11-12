@@ -138,3 +138,59 @@ func TestSecurity_ProductionRoleGuardStillApplies(t *testing.T) {
 		}
 	}
 }
+
+// passwordlessHarness 构造「生产模式 + 免密码登录」的服务端。
+func passwordlessHarness(t *testing.T) *apiHarness {
+	t.Helper()
+	st, err := store.Open(t.TempDir()+"/state.json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newMemCache()
+	svc := service.New(st, "strong-secret", nil).WithCache(c)
+	server := New(svc, t.TempDir(), c).WithSecurity(nil).WithPasswordless()
+	return &apiHarness{handler: server.Handler(), svc: svc, st: st, cache: c}
+}
+
+// 免密码登录只跳过密码校验，其余三道防线（令牌、角色隔离、演示接口）必须保持。
+func TestSecurity_PasswordlessLogin(t *testing.T) {
+	h := passwordlessHarness(t)
+
+	code, env := h.request(t, http.MethodGet, "/api/meta", nil, model.Actor{}, "")
+	assertCode(t, code, env, http.StatusOK, "")
+	d := asMap(t, env.Data)
+	if got := d["env"]; got != "production" {
+		t.Fatalf("免密码模式仍应报告 production，实际 %v", got)
+	}
+	if got, _ := d["loginPasswordless"].(bool); !got {
+		t.Fatalf("meta 应标记 loginPasswordless=true，实际 %v", d["loginPasswordless"])
+	}
+
+	// 空密码即可登录，并签发会话令牌
+	code, env = h.request(t, http.MethodPost, "/api/session",
+		map[string]string{"role": "buyer", "userId": "u001", "password": ""}, model.Actor{}, "")
+	assertCode(t, code, env, http.StatusOK, "")
+	token, _ := asMap(t, env.Data)["token"].(string)
+	if token == "" {
+		t.Fatal("免密码登录应签发会话令牌")
+	}
+
+	// 仍然只认令牌：无令牌的请求头身份一律 403
+	code, env = h.request(t, http.MethodGet, "/api/products", nil, buyerA, "")
+	assertCode(t, code, env, http.StatusForbidden, service.CodeForbidden)
+
+	code, env = h.request(t, http.MethodGet, "/api/products", nil, model.Actor{}, token)
+	assertCode(t, code, env, http.StatusOK, "")
+
+	// 演示接口依旧不注册，避免线上数据被清空
+	code, env = h.request(t, http.MethodPost, "/api/reset", map[string]string{}, opsA, "")
+	assertCode(t, code, env, http.StatusNotFound, service.CodeNotFound)
+}
+
+// 未开启免密码时，production 仍然必须校验密码。
+func TestSecurity_PasswordlessOffStillRequiresPassword(t *testing.T) {
+	h := prodHarness(t)
+	code, env := h.request(t, http.MethodPost, "/api/session",
+		map[string]string{"role": "buyer", "userId": "u001", "password": ""}, model.Actor{}, "")
+	assertCode(t, code, env, http.StatusForbidden, service.CodeForbidden)
+}
