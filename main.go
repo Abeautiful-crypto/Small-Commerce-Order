@@ -28,6 +28,15 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// isTruthy 识别常见的布尔开关写法（1/true/yes/on），其余一律视为关闭。
+func isTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // parsePasswords 解析 APP_PASSWORDS="u001:pwd1,u002:pwd2,..."，密码只从环境变量注入，不落代码/仓库。
 func parsePasswords(raw string) (map[string]string, error) {
 	out := map[string]string{}
@@ -57,6 +66,7 @@ func main() {
 	data := flag.String("data", envOr("APP_DATA", "./data/state.json"), "memory 模式的状态快照文件")
 	envMode := flag.String("env", envOr("APP_ENV", "demo"), "运行环境：demo | production")
 	passwordsRaw := flag.String("passwords", os.Getenv("APP_PASSWORDS"), "生产模式账号密码，格式 用户ID:密码,...")
+	passwordless := flag.Bool("passwordless", isTruthy(os.Getenv("APP_LOGIN_PASSWORDLESS")), "生产模式下免密码登录（仅演示/预览用，仍保留会话令牌与角色隔离）")
 	flag.Parse()
 
 	production := *envMode == "production"
@@ -75,18 +85,31 @@ func main() {
 		if *redisAddr == "" {
 			log.Fatal("生产模式身份依赖 Redis 会话，请配置 APP_REDIS_ADDR")
 		}
-		p, err := parsePasswords(*passwordsRaw)
-		if err != nil {
-			log.Fatalf("账号密码配置错误：%v", err)
-		}
-		for _, u := range model.Users {
-			if u.Role != model.RoleChannel {
-				if _, ok := p[u.ID]; !ok {
-					log.Fatalf("生产模式缺少账号 %s 的密码配置", u.ID)
+		if *passwordless {
+			// 免密码登录：账号密码不再是必填项，但仍然解析（留空即可），
+			// 便于随时把 APP_LOGIN_PASSWORDLESS 改回 0 恢复密码登录。
+			if strings.TrimSpace(*passwordsRaw) != "" {
+				p, err := parsePasswords(*passwordsRaw)
+				if err != nil {
+					log.Fatalf("账号密码配置错误：%v", err)
+				}
+				passwords = p
+			}
+			log.Printf("警告：APP_LOGIN_PASSWORDLESS 已开启，登录不再校验密码（仅限演示/预览环境）")
+		} else {
+			p, err := parsePasswords(*passwordsRaw)
+			if err != nil {
+				log.Fatalf("账号密码配置错误：%v", err)
+			}
+			for _, u := range model.Users {
+				if u.Role != model.RoleChannel {
+					if _, ok := p[u.ID]; !ok {
+						log.Fatalf("生产模式缺少账号 %s 的密码配置", u.ID)
+					}
 				}
 			}
+			passwords = p
 		}
-		passwords = p
 	}
 
 	// Redis 只做缓存 / 辅助去重 / 登录态，不可用时降级，正确性仍由 MySQL 保证。
@@ -153,6 +176,9 @@ func main() {
 	server := api.New(svc, *web, c)
 	if production {
 		server = server.WithSecurity(passwords)
+		if *passwordless {
+			server = server.WithPasswordless()
+		}
 	}
 	srv := &http.Server{
 		Addr:              *addr,

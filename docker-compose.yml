@@ -22,6 +22,8 @@ services:
       APP_REDIS_PASSWORD: "${REDIS_PASSWORD}"
       APP_CHANNEL_SECRET: "${APP_CHANNEL_SECRET}"
       APP_PASSWORDS: "${APP_PASSWORDS}"
+      # 1 = 免密码登录（仅演示/预览）：仍强制会话令牌、角色隔离，演示接口不注册。
+      APP_LOGIN_PASSWORDLESS: "${APP_LOGIN_PASSWORDLESS:-0}"
     ports:
       - "127.0.0.1:8090:8090"
     depends_on:

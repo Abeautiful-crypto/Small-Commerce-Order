@@ -172,6 +172,15 @@ function usersOf(role) {
   return list.filter((u) => u.role === role);
 }
 function renderLogin() {
+  const pwdless = !!(meta && meta.loginPasswordless);
+  const pwdField = pwdless
+    ? ''
+    : `<div class="field"><label>登录密码</label><input id="pwdInput" type="password" autocomplete="current-password" placeholder="${(meta && meta.env === 'production') ? '生产模式：请输入账号密码' : '演示模式可留空'}"/></div>`;
+  const modeNote = pwdless
+    ? '<b>免密码登录</b>：选择角色与账号即可进入，登录态仍绑定服务端会话令牌。'
+    : ((meta && meta.env === 'production')
+      ? '<b>生产模式</b>：密码由服务端环境变量配置，登录态仅认会话令牌。'
+      : '演示模式：选角色即登录，密码可留空。');
   $('#app').innerHTML = `
   <div id="login">
     <div class="login-hero"><h1>多多交易</h1><p>小型电商订单交易系统 · 前后端联通版</p></div>
@@ -179,9 +188,9 @@ function renderLogin() {
       <div class="hint">请选择登录角色。本系统<b>严格按角色隔离权限</b>：每个角色只能操作职责范围内的功能，越权请求由后端直接返回 403 并拒绝一切数据改动（登录后页面底部可体验「越权演示」）。</div>
       <div class="role-grid" id="roleGrid"></div>
       <div class="field"><label>选择演示账号</label><select id="userSel"></select></div>
-      <div class="field"><label>登录密码</label><input id="pwdInput" type="password" autocomplete="current-password" placeholder="${(meta && meta.env === 'production') ? '生产模式：请输入账号密码' : '演示模式可留空'}"/></div>
+      ${pwdField}
       <button class="enter-btn" onclick="doLogin()">进 入 系 统</button>
-      <div class="subtle">${(meta && meta.env === 'production') ? '<b>生产模式</b>：密码由服务端环境变量配置，登录态仅认会话令牌。' : '演示模式：选角色即登录，密码可留空。'}金额单位统一为「分」。</div>
+      <div class="subtle">${modeNote}金额单位统一为「分」。</div>
     </div>
   </div>`;
   let selRole = 'buyer';

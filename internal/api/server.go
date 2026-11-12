@@ -16,11 +16,12 @@ import (
 )
 
 type Server struct {
-	svc        *service.Service
-	web        string
-	cache      cache.Cache
-	production bool              // 生产模式：强制会话令牌 + 密码登录，禁用演示接口
-	passwords  map[string]string // 用户 ID → 密码（仅生产模式使用，由环境变量注入）
+	svc          *service.Service
+	web          string
+	cache        cache.Cache
+	production   bool              // 生产模式：强制会话令牌 + 密码登录，禁用演示接口
+	passwordless bool              // 生产模式下免密码登录（仅演示/预览，仍签发会话令牌）
+	passwords    map[string]string // 用户 ID → 密码（仅生产模式使用，由环境变量注入）
 }
 
 func New(svc *service.Service, webDir string, c cache.Cache) *Server {
@@ -36,6 +37,13 @@ func (s *Server) WithSecurity(passwords map[string]string) *Server {
 	if passwords != nil {
 		s.passwords = passwords
 	}
+	return s
+}
+
+// WithPasswordless 在生产模式下启用免密码登录：仍签发并强制 Redis 会话令牌、
+// 保持角色隔离、演示接口依旧不注册，仅跳过密码校验。仅用于演示/预览环境。
+func (s *Server) WithPasswordless() *Server {
+	s.passwordless = true
 	return s
 }
 
@@ -147,7 +155,10 @@ func (s *Server) Handler() http.Handler {
 		for k, v := range model.StatusLabels {
 			labels[string(k)] = v
 		}
-		return map[string]any{"users": users, "statusLabels": labels, "env": s.Env()}, nil
+		return map[string]any{
+			"users": users, "statusLabels": labels,
+			"env": s.Env(), "loginPasswordless": s.passwordless,
+		}, nil
 	}))
 
 	// 登录态：Redis sess:{token} 存角色与用户标识；Redis 不可用时降级为请求头身份。
@@ -167,7 +178,7 @@ func (s *Server) Handler() http.Handler {
 			writeErr(w, &service.BizError{Code: service.CodeForbidden, Message: "账号不存在或角色不匹配"})
 			return
 		}
-		if s.production {
+		if s.production && !s.passwordless {
 			want, configured := s.passwords[u.ID]
 			if !configured || subtle.ConstantTimeCompare([]byte(req.Password), []byte(want)) != 1 {
 				writeErr(w, &service.BizError{Code: service.CodeForbidden, Message: "账号或密码错误"})

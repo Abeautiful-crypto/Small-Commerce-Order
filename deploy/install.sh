@@ -13,10 +13,14 @@ command -v python3 >/dev/null 2>&1 || { echo "[deploy] ERROR: python3 未安装"
 if [ ! -f .env ]; then
   echo "[deploy] 首次部署：生成强随机密钥到 .env（权限 600）"
   python3 - <<'PY'
+import os
 import secrets
 
 def r(n=24):
     return secrets.token_hex(n)
+
+# 演示/验收默认免密码登录；如需密码登录，先 export APP_LOGIN_PASSWORDLESS=0 再执行。
+passwordless = "1" if os.environ.get("APP_LOGIN_PASSWORDLESS", "1") not in ("0", "false", "no", "off") else "0"
 
 lines = [
     "APP_VERSION=v1.0.0",
@@ -30,6 +34,7 @@ lines = [
         "{}:{}".format(u, secrets.token_hex(12))
         for u in ["u001", "u002", "u003", "admin", "wh", "cs"]
     ),
+    "APP_LOGIN_PASSWORDLESS=" + passwordless,
 ]
 with open(".env", "w", encoding="utf-8") as f:
     f.write("\n".join(lines) + "\n")
@@ -62,7 +67,11 @@ fi
 
 echo "[deploy] 容器状态"
 docker compose --env-file .env ps
-echo "[deploy] 登录密码（仅此处输出一次，请妥善保存）"
-grep '^APP_PASSWORDS=' .env
+if grep -q '^APP_LOGIN_PASSWORDLESS=1' .env; then
+  echo "[deploy] 登录方式：免密码（选择角色即可进入；如需密码登录请把 APP_LOGIN_PASSWORDLESS 改为 0 后重启 app）"
+else
+  echo "[deploy] 登录密码（仅此处输出一次，请妥善保存）"
+  grep '^APP_PASSWORDS=' .env
+fi
 echo "[deploy] DONE"
 echo "[deploy] 公网访问请在 1Panel 配置反向代理到 127.0.0.1:8090 并开启 HTTPS"
