@@ -1,6 +1,10 @@
 # 构建产物
 /.build/
 
+# 覆盖率产物（证据快照固定提交在 docs/coverage/）
+/coverage.out
+/coverage
+
 # 运行时状态快照（删除即恢复预置数据）
 /data/
 

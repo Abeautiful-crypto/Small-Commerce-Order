@@ -57,6 +57,15 @@
 - 是否上升为约束：是（已写入 README「测试」节：并行跑集成测试时每个包必须使用独立库，或显式指定不同 DSN）
 - 关联需求：`general/acceptance.md` §3 自动化验收
 
+### [2026-11-12] memory 存储写事务不失效 Redis 库存缓存，默认演示模式可售数量展示旧值（已修复）
+- 分类标签：#缓存一致性 #Cache-Aside #展示层 #验收
+- 现象：默认演示配置（`-store memory`，`-redis` 默认 `127.0.0.1:6379`）下，下单成功后 `GET /api/products` 的可售数量一直是旧值（4→下单→仍 4），而持久化文件里已是 3；`scripts/acceptance_check.py` 在默认环境必失败 7 项（S1 的 `stock_occupied_on_order`、S2/S3/S4 的库存回补/恢复断言等）。生产 MySQL 路径不受影响。
+- 复现步骤：`go run . -store memory`（Redis 可用）→ 买家下单 P1 → 立即查询商品列表。
+- 根因：Cache-Aside 写失效只在 `MySQLStore.Update` 提交后实现（`persistDiff` 返回被改动商品再 `InvalidateStock`）；memory `Store.Update` 改完状态即返回，从不失效 `stock:{id}` 缓存键，而 main.go 组装时 memory 存储同样挂了 Redis 缓存 → 读接口命中旧缓存。
+- 解决：`Store` 增加 `WithCache(c)` 与 `invalidateChangedStock`（对比写事务前后可售数量，仅失效变化项），`Update`/`Reset` 提交后调用；main.go 给 memory 存储挂载缓存使语义与 MySQLStore 一致；新增单测（写失效/Reset 失效/无缓存直写/持久化失败不误失效）并用默认演示模式端到端复测 4→3。修复后五大场景验收 48/48。
+- 是否上升为约束：是（已在 README「测试」节注明：任何存储实现接入缓存时，写提交后必须失效被改动的 `stock:{id}`，展示层读路径以缓存为准）
+- 关联需求：需求文档第三节规则 1（下单占用库存）/ `general/acceptance.md` 场景一
+
 ### [2026-11-11] 买家可越权触发「渠道退款成功」自助批准退款（验收发现，已修复）
 - 分类标签：#越权 #退款 #接口鉴权 #验收
 - 现象：以买家身份 `POST /api/refunds/{rid}/channel-notify {"success":true}` 返回 200，退款单 `AWAITING→SUCCEEDED`、订单转 `REFUNDED`、可售 7→8（库存被非法恢复），等于买家可自助批准退款。

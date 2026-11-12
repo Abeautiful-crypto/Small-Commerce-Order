@@ -1,0 +1,94 @@
+name: CI
+
+# 触发：push 与 PR（main / dev 分支）
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  # 1) 静态检查 + 全量测试（含 -race）+ 覆盖率门禁
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: gofmt 检查（不允许未格式化代码）
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # 单元测试：Redis 用 miniredis、MySQL 用 sqlmock，无需外部服务即可全量跑通
+      # -count=1 禁用缓存，确保覆盖率 profile 合并所有包
+      - name: go test（含 -race 与覆盖率）
+        run: go test ./... -count=1 -race -covermode=atomic -coverprofile=coverage.out
+
+      - name: 覆盖率门禁（整体与核心业务包 ≥85%）
+        run: python scripts/coverage_gate.py coverage.out
+
+      - name: 上传覆盖率产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  # 2) 镜像构建验证（不推送，仅确认 Dockerfile 可构建）
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建 Docker 镜像
+        run: docker build -t small-commerce-order:${{ github.sha }} .
+
+  # 3) 部署 + 健康检查 + 五大场景冒烟（仅 main 分支 push 时执行）
+  deploy:
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: 拉取最新代码并重建容器
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "
+            set -e
+            cd /opt/small-commerce-order
+            git pull --ff-only origin main
+            docker compose up -d --build
+          "
+
+      - name: 健康检查（最多等待 60 秒）
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 http://${{ secrets.DEPLOY_HOST }}:8090/api/meta > /dev/null; then
+              echo "服务已就绪（第 $i 次探测）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "健康检查超时" && exit 1
+
+      - name: 五大场景冒烟验收
+        run: python scripts/acceptance_check.py --base http://${{ secrets.DEPLOY_HOST }}:8090
