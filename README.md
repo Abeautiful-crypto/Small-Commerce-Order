@@ -149,8 +149,16 @@ Redis 不可用时自动降级为 `Noop`，服务仍可运行（登录退化为 
 ## 测试
 
 ```bash
-go test -race ./...                      # 默认零依赖模式；外部集成测试自动跳过
-python scripts/acceptance_check.py       # 对运行中的服务跑五大场景 HTTP 验收，输出 PASS/FAIL 明细
+go test -count=1 -race ./...                                # 默认零依赖模式；外部集成测试自动跳过
+python scripts/acceptance_check.py --base http://127.0.0.1:8090   # 五大场景 HTTP 验收，PASS/FAIL 明细
+```
+
+**覆盖率门禁**：整体与核心业务包（api/cache/model/service/store）单元覆盖率均须 ≥85%，
+CI 与本地用同一脚本强制执行；最新证据见 `docs/coverage/`（profile + 门禁输出）与 `docs/测试报告.md`。
+
+```bash
+go test ./... -count=1 -covermode=atomic -coverprofile=coverage.out
+python scripts/coverage_gate.py coverage.out     # 不达标退出码 1
 ```
 
 验收脚本仅用 Python 标准库，逐项打印断言的预期值与实际值，并扫描四类硬错误
