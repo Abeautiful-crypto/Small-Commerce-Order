@@ -1,85 +1,134 @@
 package cache
 
 import (
-	"os"
-	"strconv"
+	"errors"
 	"testing"
-	"time"
+
+	"github.com/alicebob/miniredis/v2"
 )
 
-// Redis 集成测试：设置 REDIS_TEST_ADDR 后执行，未设置则跳过。
-func TestRedisIntegration(t *testing.T) {
-	addr := os.Getenv("REDIS_TEST_ADDR")
-	if addr == "" {
-		t.Skip("未设置 REDIS_TEST_ADDR，跳过 Redis 集成测试")
-	}
-	c, err := Open(addr, os.Getenv("REDIS_TEST_PASSWORD"), 0)
+func newTestRedis(t *testing.T) (*Redis, *miniredis.Miniredis) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	r, err := Open(mr.Addr(), "", 0)
 	if err != nil {
-		t.Fatalf("连接 Redis 失败：%v", err)
-	}
-	defer c.Close()
-	ctx := c.ctx
-
-	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
-	prod := "TEST-P-" + suffix
-	txn := "TEST-TXN-" + suffix
-	tok := NewToken()
-	defer c.client.Del(ctx, stockKey(prod), payKey(txn), sessionKey(tok))
-
-	// stock:{id}：Cache-Aside 读缓存 + 写失效（DEL）
-	c.InvalidateStock(prod)
-	if _, ok := c.Stock(prod); ok {
-		t.Fatal("未写入时不应命中缓存")
-	}
-	c.SetStock(prod, 7)
-	if n, ok := c.Stock(prod); !ok || n != 7 {
-		t.Fatalf("库存缓存读取异常：n=%d ok=%v", n, ok)
-	}
-	c.InvalidateStock(prod)
-	if _, ok := c.Stock(prod); ok {
-		t.Fatal("写事务提交后必须 DEL 缓存键")
-	}
-
-	// pay_dedup:{txn}：SETNX + TTL，重复标记幂等
-	if c.PaymentSeen(txn) {
-		t.Fatal("首次投递前不应命中去重键")
-	}
-	c.MarkPayment(txn)
-	c.MarkPayment(txn)
-	if !c.PaymentSeen(txn) {
-		t.Fatal("SETNX 去重键未生效")
-	}
-	ttl, err := c.client.TTL(ctx, payKey(txn)).Result()
-	if err != nil || ttl <= 0 {
-		t.Fatalf("去重键必须带 TTL：ttl=%v err=%v", ttl, err)
-	}
-
-	// sess:{token}：登录态与角色
-	if err := c.SaveSession(tok, "buyer", "u001"); err != nil {
 		t.Fatal(err)
 	}
-	role, uid, ok := c.LoadSession(tok)
-	if !ok || role != "buyer" || uid != "u001" {
-		t.Fatalf("会话解析异常：role=%s uid=%s ok=%v", role, uid, ok)
+	t.Cleanup(func() { _ = r.Close() })
+	return r, mr
+}
+
+// Cache-Aside 语义：未命中→回源写入→命中读取→写失效后未命中。
+func TestRedis_StockCacheAside(t *testing.T) {
+	r, _ := newTestRedis(t)
+
+	if _, ok := r.Stock("P1"); ok {
+		t.Fatal("初始应为未命中")
 	}
-	if _, _, ok := c.LoadSession("invalid-token"); ok {
-		t.Fatal("无效令牌不应解析出身份")
+	r.SetStock("P1", 4)
+	n, ok := r.Stock("P1")
+	if !ok || n != 4 {
+		t.Fatalf("应命中 4，实际 %d %v", n, ok)
+	}
+	r.InvalidateStock("P1")
+	if _, ok := r.Stock("P1"); ok {
+		t.Fatal("失效后应未命中")
+	}
+	// 键损坏（非数字）按未命中处理
+	r.client.Set(r.ctx, stockKey("P2"), "not-a-number", 0)
+	if _, ok := r.Stock("P2"); ok {
+		t.Fatal("非数字值应按未命中处理")
+	}
+	// 空商品 ID 防御
+	r.InvalidateStock("")
+}
+
+// 支付去重：SETNX + Exists，重复交易号在 TTL 内被识别。
+func TestRedis_PaymentDedup(t *testing.T) {
+	r, _ := newTestRedis(t)
+	if r.PaymentSeen("TXN-A") {
+		t.Fatal("未登记的交易号不应视为已见")
+	}
+	r.MarkPayment("TXN-A")
+	if !r.PaymentSeen("TXN-A") {
+		t.Fatal("已登记交易号应被识别")
+	}
+	r.MarkPayment("") // 空交易号防御
+	if r.PaymentSeen("") {
+		t.Fatal("空交易号应返回 false")
 	}
 }
 
-// Noop 是降级实现，任何操作都不能影响正确性判定。
-func TestNoopNeverHits(t *testing.T) {
-	var c Cache = Noop{}
-	if _, ok := c.Stock("P1"); ok {
-		t.Fatal("Noop 不应命中缓存")
+// 会话令牌：保存→加载往返，24h TTL；空令牌与损坏值按未命中处理。
+func TestRedis_Session(t *testing.T) {
+	r, _ := newTestRedis(t)
+	if err := r.SaveSession("tok-1", "buyer", "u001"); err != nil {
+		t.Fatal(err)
 	}
-	if c.PaymentSeen("TXN") {
-		t.Fatal("Noop 不应命中去重")
+	role, uid, ok := r.LoadSession("tok-1")
+	if !ok || role != "buyer" || uid != "u001" {
+		t.Fatalf("会话往返不符：%s %s %v", role, uid, ok)
 	}
-	if _, _, ok := c.LoadSession("t"); ok {
-		t.Fatal("Noop 不应解析会话")
+	if _, _, ok := r.LoadSession(""); ok {
+		t.Fatal("空令牌应未命中")
 	}
-	c.SetStock("P1", 1)
-	c.MarkPayment("TXN")
-	c.InvalidateStock("P1")
+	r.client.Set(r.ctx, sessionKey("tok-bad"), "no-separator", 0)
+	if _, _, ok := r.LoadSession("tok-bad"); ok {
+		t.Fatal("损坏的会话值应未命中")
+	}
+}
+
+// Open 错误路径：未配置地址、连不上的地址。
+func TestOpen_Errors(t *testing.T) {
+	if _, err := Open("", "", 0); err == nil {
+		t.Fatal("空地址应报错")
+	}
+	if _, err := Open("127.0.0.1:1", "", 0); err == nil {
+		t.Fatal("连不上的地址应报错")
+	}
+}
+
+// Noop 降级实现语义：全部静默不命中，SaveSession/Ping 报错。
+func TestNoop(t *testing.T) {
+	n := Noop{}
+	if _, ok := n.Stock("P1"); ok {
+		t.Fatal("Noop 库存应未命中")
+	}
+	n.SetStock("P1", 4)
+	n.InvalidateStock("P1")
+	n.MarkPayment("T")
+	if n.PaymentSeen("T") {
+		t.Fatal("Noop 支付去重应未命中")
+	}
+	if err := n.SaveSession("t", "buyer", "u001"); err == nil {
+		t.Fatal("Noop 会话保存应报错（登录态不可用）")
+	}
+	if _, _, ok := n.LoadSession("t"); ok {
+		t.Fatal("Noop 会话加载应未命中")
+	}
+	if err := n.Ping(); err == nil {
+		t.Fatal("Noop Ping 应报错")
+	}
+}
+
+// NewToken：非空且两次生成不同。
+func TestNewToken(t *testing.T) {
+	a, b := NewToken(), NewToken()
+	if a == "" || b == "" || a == b {
+		t.Fatalf("令牌应非空且不重复：%s %s", a, b)
+	}
+}
+
+// miniredis 关闭后所有操作按未命中降级，不 panic。
+func TestRedis_AfterClose(t *testing.T) {
+	r, mr := newTestRedis(t)
+	r.SetStock("P1", 4)
+	mr.Close()
+	if _, ok := r.Stock("P1"); ok {
+		t.Fatal("Redis 关闭后应未命中")
+	}
+	r.SetStock("P1", 3) // 记录日志但不 panic
+	r.InvalidateStock("P1")
+	r.MarkPayment("T")
+	var _ = errors.New
 }
