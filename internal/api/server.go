@@ -381,6 +381,8 @@ func (s *Server) Handler() http.Handler {
 				Error: &service.BizError{Code: service.CodeNotFound, Message: "接口不存在"}})
 			return
 		}
+		// 强制浏览器回源校验：避免前端改动后被旧 app.js / style.css 缓存掩盖
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		fs.ServeHTTP(w, r)
 	}))
 	return mux
