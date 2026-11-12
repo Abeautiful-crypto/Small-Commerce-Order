@@ -31,6 +31,7 @@ go run .
 | `-secret` | `demo-channel-secret`（优先读 `APP_CHANNEL_SECRET`） | 模拟支付渠道验签密钥 |
 | `-env` | `demo`（优先读 `APP_ENV`） | `demo` / `production`；生产模式启用认证并收紧接口 |
 | `-passwords` | 空（优先读 `APP_PASSWORDS`） | 生产模式账号密码，格式 `用户ID:密码,...` |
+| `-passwordless` | 关（优先读 `APP_LOGIN_PASSWORDLESS=1`） | 生产模式下免密码登录，仅用于演示/预览 |
 
 所有参数都支持同名 `APP_*` 环境变量（`APP_ADDR` / `APP_MYSQL_DSN` / `APP_REDIS_ADDR` / `APP_REDIS_PASSWORD` 等），
 便于容器化注入；生产模式强校验见「部署上线」。`/api/meta` 的 `data.env` 会返回当前运行环境。
@@ -71,6 +72,7 @@ cd Small-Commerce-Order
 cp .env.example .env
 # 生成 4 组强随机值：openssl rand -hex 24
 # 编辑 .env 填写 MYSQL_* / REDIS_PASSWORD / APP_CHANNEL_SECRET / APP_PASSWORDS（6 个账号）
+# 演示/预览可加一行 APP_LOGIN_PASSWORDLESS=1 免密码登录（仍强制会话与角色隔离）
 chmod 600 .env
 docker compose --env-file .env up -d --build
 docker compose ps
@@ -90,7 +92,7 @@ docker compose logs --tail=50 app
 
 | 项 | demo（默认） | production（`APP_ENV=production`） |
 |---|---|---|
-| 登录 | 选角色即登录，密码可留空 | 必须账号密码（`APP_PASSWORDS`） |
+| 登录 | 选角色即登录，密码可留空 | 必须账号密码（`APP_PASSWORDS`）；设 `APP_LOGIN_PASSWORDLESS=1` 可免密码但仍走会话 |
 | 身份 | `X-Token` 优先，可回退 `X-Role` / `X-User-Id` | 只认 Redis 会话 `X-Token`，请求头伪造一律 403 |
 | 演示接口 | `/api/reset`、`/api/orders/{id}/expire` 可用 | 不注册（404），避免线上数据被清空 |
 | 启动校验 | 允许默认弱口令便于本地演示 | 强验签密钥、非默认 DSN、Redis 可用、6 个账号密码齐全，否则拒绝启动 |
