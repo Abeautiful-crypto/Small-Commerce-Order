@@ -92,5 +92,6 @@ jobs:
           done
           echo "健康检查超时" && exit 1
 
-      - name: 五大场景冒烟验收
-        run: python scripts/acceptance_check.py --base http://${{ secrets.DEPLOY_HOST }}
+      # 生产环境只读冒烟（零写入）；五大场景完整验收仅用于 demo 环境
+      - name: 生产只读冒烟验收
+        run: python scripts/acceptance_check.py --base http://${{ secrets.DEPLOY_HOST }} --smoke
