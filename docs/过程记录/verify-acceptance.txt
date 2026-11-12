@@ -1,0 +1,57 @@
+---------------------------------------------------------------------------------------------------------------------
+ACCEPTANCE REPORT  base=http://127.0.0.1:8090
+---------------------------------------------------------------------------------------------------------------------
+S1   | product_visible_and_stock            | PASS | expect=4                        | actual=4
+S1   | order_pending_pay                    | PASS | expect=PENDING_PAY              | actual=PENDING_PAY
+S1   | price_snapshot                       | PASS | expect=10000/10000              | actual=10000/10000
+S1   | stock_occupied_on_order              | PASS | expect=3                        | actual=3
+S1   | payment_accepted                     | PASS | expect=ACCEPTED                 | actual=ACCEPTED
+S1   | status_pending_ship                  | PASS | expect=PENDING_SHIP             | actual=PENDING_SHIP
+S1   | duplicate_notify                     | PASS | expect=DUPLICATE                | actual=DUPLICATE
+S1   | no_double_charge                     | PASS | expect=20000                    | actual=20000
+S1   | ship_once                            | PASS | expect=200                      | actual=200
+S1   | status_shipped                       | PASS | expect=SHIPPED                  | actual=SHIPPED
+S1   | ship_twice_rejected                  | PASS | expect=409                      | actual=409
+S1   | recon_amount_and_net                 | PASS | expect=recv=20000 net=20000     | actual=recv=20000 net=20000
+S1   | stock_unchanged_after_ship           | PASS | expect=3                        | actual=3
+S2   | setup_5_units                        | PASS | expect=5                        | actual=5
+S2   | 20_concurrent_only_5_success         | PASS | expect=5                        | actual=5
+S2   | no_oversell_no_negative              | PASS | expect=0                        | actual=0
+S2   | cancel_release_once                  | PASS | expect=status=200 avail=1       | actual=status=200 avail=1
+S2   | close_idempotent_no_double_release   | PASS | expect=reject + avail=1         | actual=status=409 avail=1
+S2   | released_stock_can_be_bought         | PASS | expect=status=200 avail=0       | actual=status=200 avail=0
+S3   | status_refunding                     | PASS | expect=REFUNDING                | actual=REFUNDING
+S3   | hidden_from_warehouse                | PASS | expect=not in list              | actual=not in list
+S3   | ship_blocked_during_refund           | PASS | expect=409                      | actual=409
+S3   | reject_back_to_pending_ship          | PASS | expect=PENDING_SHIP             | actual=PENDING_SHIP
+S3   | ship_after_reject                    | PASS | expect=200                      | actual=200
+S3   | channel_fail_keeps_pending           | PASS | expect=FAILED avail=6           | actual=FAILED avail=6
+S3   | retry_success_refunded               | PASS | expect=REFUNDED                 | actual=REFUNDED
+S3   | stock_restored                       | PASS | expect=7                        | actual=7
+S3   | refund_ship_mutex                    | PASS | expect=exactly one success      | actual=refund=409 ship=200
+S3   | final_state_single                   | PASS | expect=REFUNDING|SHIPPED        | actual=SHIPPED
+S4   | order_closed                         | PASS | expect=CLOSED                   | actual=CLOSED
+S4   | release_once_on_close                | PASS | expect=8                        | actual=8
+S4   | late_payment_to_abnormal             | PASS | expect=LATE_PAYMENT             | actual=LATE_PAYMENT
+S4   | no_order_revive                      | PASS | expect=ABNORMAL_PAY             | actual=ABNORMAL_PAY
+S4   | no_stock_reoccupy                    | PASS | expect=8                        | actual=8
+S4   | abnormal_list_visible                | PASS | expect=1                        | actual=1
+S4   | refund_source_late                   | PASS | expect=late                     | actual=late
+S4   | status_refunded                      | PASS | expect=REFUNDED                 | actual=REFUNDED
+S4   | late_refund_no_stock_restore         | PASS | expect=8                        | actual=8
+S4   | no_double_charge                     | PASS | expect=10000                    | actual=10000
+S4   | no_double_refund                     | PASS | expect=10000                    | actual=10000
+S4   | abnormal_record_not_erased           | PASS | expect=1 record REFUNDED        | actual=1 record REFUNDED
+S5   | cross_buyer_denied                   | PASS | expect=403                      | actual=403
+S5   | cross_buyer_data_unchanged           | PASS | expect=PENDING_PAY              | actual=PENDING_PAY
+S5   | cross_role_denied                    | PASS | expect=403                      | actual=403
+S5   | cross_role_data_unchanged            | PASS | expect=4                        | actual=4
+S5   | ledger_append_only                   | PASS | expect=prefix unchanged + growth | actual=before=3 after=6 prefix_ok=True
+S5   | buyer_cannot_confirm_channel_refund  | PASS | expect=403                      | actual=403
+S5   | unauthorized_channel_no_state_change | PASS | expect=AWAITING                 | actual=AWAITING
+---------------------------------------------------------------------------------------------------------------------
+HARD_ERROR oversell             NONE
+HARD_ERROR duplicate_charge     NONE
+HARD_ERROR duplicate_release    NONE
+HARD_ERROR unauthorized         NONE
+TOTAL=48 PASS=48 FAIL=0
