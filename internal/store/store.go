@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"small-commerce-order/internal/cache"
 	"small-commerce-order/internal/model"
 )
 
@@ -31,6 +32,7 @@ type Store struct {
 	state *model.State
 	path  string
 	now   func() time.Time
+	cache cache.Cache // 可选：挂载后与 MySQLStore 相同，写提交后主动失效库存缓存
 }
 
 // Open 打开状态文件；不存在时写入预置数据。
@@ -114,10 +116,21 @@ func newSeed(now time.Time) *model.State {
 	return st
 }
 
+// WithCache 为内存存储挂载缓存（Cache-Aside 写失效）：任何成功提交的写事务
+// 之后，被改动的商品库存缓存键都会被 DEL，保证展示层读到最新可售数量。
+// 语义与 MySQLStore.Update 提交后 InvalidateStock 完全一致。
+func (s *Store) WithCache(c cache.Cache) *Store {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cache = c
+	return s
+}
+
 // Update 执行一个写事务。fn 内所有校验通过后再改动；返回错误则整体回滚。
 func (s *Store) Update(fn func(*model.State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := s.state
 	next, err := clone(s.state)
 	if err != nil {
 		return err
@@ -126,7 +139,22 @@ func (s *Store) Update(fn func(*model.State) error) error {
 		return err
 	}
 	s.state = next
-	return s.persist()
+	if err := s.persist(); err != nil {
+		return err
+	}
+	s.invalidateChangedStock(before, next)
+	return nil
+}
+
+// invalidateChangedStock 对比写事务前后的商品可售数量，失效发生变化的缓存键。
+// 调用方必须已持有写锁。
+func (s *Store) invalidateChangedStock(before, after *model.State) {
+	if s.cache == nil {
+		return
+	}
+	if ids := changedStockIDs(before, after); len(ids) > 0 {
+		s.cache.InvalidateStock(ids...)
+	}
 }
 
 // Snapshot 返回状态深拷贝，供查询层自由遍历（不持锁、无数据竞争）。
@@ -140,8 +168,31 @@ func (s *Store) Snapshot() (*model.State, error) {
 func (s *Store) Reset() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := s.state
 	s.state = newSeed(s.now())
-	return s.persist()
+	if err := s.persist(); err != nil {
+		return err
+	}
+	s.invalidateChangedStock(before, s.state)
+	return nil
+}
+
+// changedStockIDs 返回两个状态之间可售数量发生变化的商品 ID。
+func changedStockIDs(before, after *model.State) []string {
+	if before == nil || after == nil {
+		return nil
+	}
+	avail := make(map[string]int, len(before.Products))
+	for _, p := range before.Products {
+		avail[p.ID] = p.Available
+	}
+	var changed []string
+	for _, p := range after.Products {
+		if old, ok := avail[p.ID]; ok && old != p.Available {
+			changed = append(changed, p.ID)
+		}
+	}
+	return changed
 }
 
 // Close 内存实现无需释放资源。
