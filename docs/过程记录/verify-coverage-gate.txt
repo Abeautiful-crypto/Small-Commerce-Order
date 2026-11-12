@@ -1,0 +1,7 @@
+	small-commerce-order		coverage: 0.0% of statements
+ok  	small-commerce-order/internal/api	1.776s	coverage: 85.9% of statements
+ok  	small-commerce-order/internal/app	1.816s	coverage: 80.5% of statements
+ok  	small-commerce-order/internal/cache	2.227s	coverage: 96.4% of statements
+ok  	small-commerce-order/internal/model	1.131s	coverage: 100.0% of statements
+ok  	small-commerce-order/internal/service	1.990s	coverage: 90.0% of statements
+ok  	small-commerce-order/internal/store	1.662s	coverage: 92.2% of statements

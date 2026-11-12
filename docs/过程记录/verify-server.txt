@@ -1,0 +1,1 @@
+2026/11/12 11:27:03 订单交易系统已启动：http://localhost:8090  env=demo store=mysql redis=connected(127.0.0.1:6379) web=./web
