@@ -345,13 +345,56 @@ def guard_environment():
     return True
 
 
+def smoke_checks():
+    """只读冒烟验收：适用于生产环境，零写入。
+
+    覆盖：元信息、演示登录、商品列表、订单列表（均为只读接口）。
+    """
+    fails = 0
+    total = 0
+
+    def sc(name, ok, expect, actual):
+        nonlocal fails, total
+        total += 1
+        if not ok:
+            fails += 1
+        print("SMOKE %-18s %s expect=%s actual=%s" % (name, "PASS" if ok else "FAIL", expect, actual))
+
+    st, meta = call("/api/meta")
+    env = (meta.get("data") or {}).get("env")
+    sc("meta_ok", st == 200 and bool(meta.get("data")), "200+data", st)
+    sc("env_exposed", env in ("production", "demo"), "production|demo", env)
+
+    st, sess = call("/api/session", "POST", {"role": "buyer", "userId": "u001"})
+    tok = (sess.get("data") or {}).get("token")
+    sc("demo_login", st == 200 and bool(tok), "200+token", st)
+
+    st, prods = call("/api/products", token=tok)
+    data = prods.get("data")
+    prods_list = data if isinstance(data, list) else (data or {}).get("products") or []
+    sc("products_readable", st == 200 and bool(prods_list), "200+non-empty", st)
+
+    st, orders = call("/api/orders", token=tok)
+    sc("orders_readable", st == 200, "200", st)
+
+    print("SMOKE TOTAL=%d PASS=%d FAIL=%d" % (total, total - fails, fails))
+    for r in RESULTS:
+        if r[2] == "FAIL":
+            print("FAILED_ASSERT %s/%s expect=%s actual=%s" % (r[0], r[1], r[3], r[4]))
+    return 1 if fails else 0
+
+
 def main():
     global BASE
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default=BASE)
     ap.add_argument("--no-reset", action="store_true", help="结束后不重置演示数据，保留现场")
+    ap.add_argument("--smoke", action="store_true",
+                    help="只读冒烟模式：可对生产环境运行，零写入（CI 部署后冒烟用）")
     args = ap.parse_args()
     BASE = args.base.rstrip("/")
+    if args.smoke:
+        return smoke_checks()
     if not guard_environment():
         return 2
     T = {
