@@ -1,11 +1,12 @@
 name: CI
 
-# 触发：push 与 PR（main / dev 分支）
+# 触发：push 与 PR（main / dev 分支）；另支持手动触发（用于部署重试）
 on:
   push:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  workflow_dispatch:
 
 jobs:
   # 1) 静态检查 + 全量测试（含 -race）+ 覆盖率门禁
