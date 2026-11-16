@@ -18,6 +18,35 @@ var Users = []User{
 	{ID: "channel", Name: "模拟支付渠道", Role: RoleChannel},
 }
 
+// 页面端划分：C 端（买家购物页）与 B 端（工作台）分别由独立端口托管，
+// 登录接口按角色所属端做硬校验，仓库管理员无法在 C 端登录。
+const (
+	SideCustomer = "c" // C 端：仅买家
+	SideBusiness = "b" // B 端：运营 / 仓库 / 客服
+)
+
+// SideOf 返回角色所属端；渠道身份不属于任何登录端（返回空串）。
+func SideOf(role Role) string {
+	switch role {
+	case RoleBuyer:
+		return SideCustomer
+	case RoleOps, RoleWarehouse, RoleCS:
+		return SideBusiness
+	}
+	return ""
+}
+
+// SideLabel 返回端的中文名称，用于登录页与错误提示。
+func SideLabel(side string) string {
+	switch side {
+	case SideCustomer:
+		return "C 端（买家）"
+	case SideBusiness:
+		return "B 端（工作台）"
+	}
+	return "任意端"
+}
+
 func FindUser(id string, role Role) (User, bool) {
 	for _, u := range Users {
 		if u.ID == id && u.Role == role {

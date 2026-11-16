@@ -15,12 +15,16 @@ cd Small-Commerce-Order
 go run .
 ```
 
-浏览器打开 <http://localhost:8090>。首次预置 2 个商品（单价 10000 分）、3 名买家、
-运营/仓库/客服各 1 名、1 条待发货订单与 1 条收款流水。运营页「重置演示数据」可恢复初态。
+浏览器打开 **C 端买家页** <http://localhost:8090>，**B 端工作台** <http://localhost:8091>。
+两端是独立页面、独立端口、独立登录入口：C 端只接受买家账号，B 端只接受运营/仓库/客服账号，
+登录接口会按角色所属端硬校验（用仓库管理员账号在 C 端登录会被拒绝，反之亦然）。
+首次预置 2 个商品（单价 10000 分）、3 名买家、运营/仓库/客服各 1 名、
+1 条待发货订单与 1 条收款流水。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `-addr` | `:8090` | HTTP 监听地址 |
+| `-addr` | `:8090` | C 端（买家页）监听地址 |
+| `-addr-b` | `:8091` | B 端（工作台）监听地址，必须与 `-addr` 不同 |
 | `-store` | `mysql` | `mysql`（真相源）/ `memory`（零依赖离线回退） |
 | `-dsn` | `root:root@tcp(127.0.0.1:3306)/small_commerce_order?charset=utf8mb4&parseTime=true&loc=Local` | MySQL DSN |
 | `-migrations` | `./migrations` | 版本化建表迁移目录 |
@@ -80,11 +84,12 @@ docker compose logs --tail=50 app
 ```
 
 首次启动自动执行 `migrations/001_init.up.sql` 并写入预置数据。
-`mysql` / `redis` 仅加入内部网络、不暴露宿主 3306/6379；`app` 只绑定 `127.0.0.1:8090`。
+`mysql` / `redis` 仅加入内部网络、不暴露宿主 3306/6379；`app` 只绑定 `127.0.0.1:8090`（C 端）与 `127.0.0.1:8091`（B 端）。
 
 ### 1Panel 反向代理与 HTTPS
 
-1. 「网站」→ 创建网站 → 反向代理，代理地址填 `http://127.0.0.1:8090`。
+1. 「网站」→ 创建网站 → 反向代理，代理地址填 `http://127.0.0.1:8090`（C 端）；
+   B 端工作台另建一个站点（如 `admin.你的域名`）反向代理到 `http://127.0.0.1:8091`。
 2. 「证书」→ 申请 Let's Encrypt → 开启强制 HTTPS。
 3. 自定义 header 参考 `deploy/1panel-proxy.conf.example`。
 

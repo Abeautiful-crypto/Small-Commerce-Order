@@ -99,14 +99,38 @@ func (s *Service) CancelOrder(actor model.Actor, orderID string) error {
 	})
 }
 
+// closeBatchLimit 单轮超时关单的候选批量上限：保证每轮写事务处理的订单数有界。
+const closeBatchLimit = 500
+
 // CloseExpiredOrders R2：超时以服务端时间判断；后台每秒扫描，也可由接口惰性触发。
+//
+// 性能设计（大表场景）：
+//  1. 先走 (status, expires_at) 复合索引取「已到期的待付款订单」候选集（默认窗口
+//     即全部过期单——10 分钟有效期决定了它们必然产生于最近约 10 分钟内），
+//     代价 ∝ 过期单数量，与订单总量无关；
+//  2. 没有候选时直接返回，不进写事务（绝大多数扫描轮次零成本，不抢全局写锁）；
+//  3. 有候选时才进写事务，且只处理候选 ID，状态机 CAS + 库存条件更新语义不变。
 func (s *Service) CloseExpiredOrders() (int, error) {
+	now := s.now()
+	ids, err := s.st.PendingExpiredIDs(now, closeBatchLimit)
+	if err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
 	n := 0
-	err := s.st.Update(func(st *model.State) error {
-		now := s.now()
+	err = s.st.Update(func(st *model.State) error {
 		for _, o := range st.Orders {
-			if o.Status != model.StatusPendingPay || now.Before(o.ExpiresAt) {
+			if !want[o.ID] {
 				continue
+			}
+			if o.Status != model.StatusPendingPay || now.Before(o.ExpiresAt) {
+				continue // 候选取得后订单已被支付/取消：以状态机为准，跳过
 			}
 			if err := closeOrder(st, o, now, "待付款超过 10 分钟，系统自动关闭"); err != nil {
 				return err

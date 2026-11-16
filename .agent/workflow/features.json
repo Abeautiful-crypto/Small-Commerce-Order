@@ -1,0 +1,278 @@
+{
+  "project": "small-commerce-order",
+  "version": "1.0",
+  "entry": "AGENTS.md",
+  "rules": [".agent/general/feature-gate.md", ".agent/general/unit-test.md"],
+  "features": [
+    {
+      "id": "F0.1",
+      "stage": 0,
+      "type": "unit",
+      "title": "开发基线自检（不写业务代码）",
+      "rule_ref": "general/acceptance.md §1",
+      "modules": [],
+      "test_files": [],
+      "run": "",
+      "requires": [],
+      "assertions": ["gofmt -l 无输出", "go vet ./... 退出码 0", "go test -race -count=1 ./... 全绿"],
+      "commands": [
+        {"name": "gofmt", "cmd": ["gofmt", "-l", "."], "expect_empty": true},
+        {"name": "go vet", "cmd": ["go", "vet", "./..."]},
+        {"name": "baseline unit tests", "cmd": ["go", "test", "-race", "-count=1", "./..."]}
+      ]
+    },
+    {
+      "id": "F1.1",
+      "stage": 1,
+      "type": "unit",
+      "title": "状态机守卫与 7 态迁移",
+      "rule_ref": "需求文档第四节状态机 / backend/constraints.md 铁律-状态机",
+      "modules": ["internal/model"],
+      "test_files": ["internal/model/model_test.go"],
+      "run": "TestCanTransition|TestTransition|TestIsTerminal",
+      "requires": ["F0.1"],
+      "assertions": ["合法迁移全通过", "非法迁移返回明确错误", "终态不可再迁移"]
+    },
+    {
+      "id": "F1.2",
+      "stage": 1,
+      "type": "unit",
+      "title": "领域模型、流水只增与预置账号",
+      "rule_ref": "backend/constraints.md 铁律-流水不可变 / 规则 8",
+      "modules": ["internal/model"],
+      "test_files": ["internal/model/model_test.go"],
+      "run": "TestOrderStatus_Label|TestState_Finders|TestAppendLedger|TestFindUser|TestNextID_FmtInt",
+      "requires": ["F1.1"],
+      "assertions": ["金额全链路 int64 分", "流水只增不改", "账号查找按角色隔离"]
+    },
+    {
+      "id": "F1.3",
+      "stage": 1,
+      "type": "unit",
+      "title": "配置解析与启动/生产守卫",
+      "rule_ref": "backend/tech-stack.md §3 / README 部署节",
+      "modules": ["internal/app"],
+      "test_files": ["internal/app/app_test.go"],
+      "run": "TestLoadConfig|TestBuild|TestIsTruthy|TestParsePasswords",
+      "requires": ["F1.2"],
+      "assertions": ["生产模式拒绝内存存储", "生产模式要求 Redis", "未知 store 类型明确报错"]
+    },
+    {
+      "id": "F2.1",
+      "stage": 2,
+      "type": "unit",
+      "title": "内存存储事务语义与缓存写失效",
+      "rule_ref": "backend/tech-stack.md §2 Cache-Aside / issue-log 2026-11-12 条",
+      "modules": ["internal/store"],
+      "test_files": ["internal/store/store_test.go"],
+      "run": "TestStore_|TestChangedStockIDs_EdgeCases",
+      "requires": ["F1.1"],
+      "assertions": ["写提交后失效变化的 stock:{id}", "回滚不误失效", "Reset 失效全部", "无缓存直写不 panic"]
+    },
+    {
+      "id": "F2.2",
+      "stage": 2,
+      "type": "unit",
+      "title": "MySQL 原子更新 / CAS / 唯一索引（sqlmock 单测）",
+      "rule_ref": "backend/constraints.md 铁律-库存/幂等 / backend/tech-stack.md §1",
+      "modules": ["internal/store"],
+      "test_files": ["internal/store/mysql_mock_test.go", "internal/store/mysql_mock_errors_test.go"],
+      "run": "TestMySQLStore_|TestPersistHelpers|TestSplitSQL|TestEnsureDatabase_Errors|TestLoadState_|TestPersistDiff_|TestTxLifecycleErrors|TestStore_PersistAndCloseErrors|TestOpenMySQL_",
+      "requires": ["F2.1"],
+      "assertions": ["库存 WHERE 可售>=? 条件更新", "订单 CAS 失败即幂等命中", "事务失败整体回滚", "唯一索引冲突只记流水"]
+    },
+    {
+      "id": "F2.3",
+      "stage": 2,
+      "type": "unit",
+      "optional": true,
+      "env_required": "MYSQL_TEST_DSN",
+      "title": "MySQL 真实集成（不超卖 / 持久化 / 重启一致）",
+      "rule_ref": "backend/tech-stack.md §1.2 / README 测试节",
+      "modules": ["internal/store"],
+      "test_files": ["internal/store/mysql_test.go"],
+      "run": "TestMySQL_",
+      "requires": ["F2.2"],
+      "assertions": ["20 并发抢 5 件成功数 = 5", "跨重开数据一致", "事务回滚不留脏数据"]
+    },
+    {
+      "id": "F2.4",
+      "stage": 2,
+      "type": "unit",
+      "title": "Redis 缓存 / 去重 / 会话 / Noop 降级",
+      "rule_ref": "backend/tech-stack.md §2",
+      "modules": ["internal/cache"],
+      "test_files": ["internal/cache/cache_test.go"],
+      "run": "TestRedis_|TestOpen_Errors|TestNoop|TestNewToken",
+      "requires": ["F1.1"],
+      "assertions": ["Cache-Aside 读路径", "SETNX 去重带 TTL", "Redis 不可用自动降级"]
+    },
+    {
+      "id": "F3.1",
+      "stage": 3,
+      "type": "unit",
+      "title": "下单占用库存与参数/权限校验",
+      "rule_ref": "需求文档第三节规则 1 / 状态机 待付款",
+      "modules": ["internal/service"],
+      "test_files": ["internal/service/order_test.go"],
+      "run": "TestUnit_CreateOrderValidation|TestUnit_SetOnSaleGuards",
+      "requires": ["F1.1", "F2.1", "F2.4"],
+      "assertions": ["可售不足明确报错", "库存原子占用不超卖", "上/下架仅运营可操作"]
+    },
+    {
+      "id": "F3.2",
+      "stage": 3,
+      "type": "unit",
+      "title": "取消 / 超时关闭幂等与库存只释放一次",
+      "rule_ref": "需求文档第三节规则 2 / 铁律-幂等-关闭",
+      "modules": ["internal/service"],
+      "test_files": ["internal/service/order_test.go"],
+      "run": "TestUnit_CancelAndCloseIdempotency|TestUnit_ForceExpireGuards|TestUnit_CloseExpiredNoSideEffect",
+      "requires": ["F3.1"],
+      "assertions": ["取消+超时同到只释放一次", "关闭用 CAS WHERE 待付款", "空扫描无副作用"]
+    },
+    {
+      "id": "F3.3",
+      "stage": 3,
+      "type": "unit",
+      "title": "支付通知幂等 / 拒收 / 迟到通知",
+      "rule_ref": "需求文档第三节规则 3、7 / 铁律-幂等-支付",
+      "modules": ["internal/service"],
+      "test_files": ["internal/service/order_test.go"],
+      "run": "TestUnit_PaymentNotify|TestUnit_AutoCloseBeforeLateNotify",
+      "requires": ["F3.2"],
+      "assertions": ["同交易号二次通知只记流水", "金额/验签不符拒收", "已发货忽略支付通知", "关闭后迟到通知不复活"]
+    },
+    {
+      "id": "F3.4",
+      "stage": 3,
+      "type": "unit",
+      "title": "售前退款、审核守卫与失败重试",
+      "rule_ref": "需求文档第三节规则 4、5 / 铁律-退款恢复看来源",
+      "modules": ["internal/service"],
+      "test_files": ["internal/service/refund_test.go"],
+      "run": "TestUnit_ApplyRefundGuards|TestUnit_ReviewRefundGuards|TestUnit_RejectRefundRecordsReason|TestUnit_RetryRefundGuards",
+      "requires": ["F3.1"],
+      "assertions": ["退款中期间发货被挡", "首次失败保留待处理", "presale 退款成功恢复库存", "拒绝原因留痕"]
+    },
+    {
+      "id": "F3.5",
+      "stage": 3,
+      "type": "unit",
+      "title": "渠道通知身份校验 / 异常支付 / 发货守卫",
+      "rule_ref": "backend/constraints.md 铁律-模拟渠道回调 / issue-log 2026-11-11 越权条",
+      "modules": ["internal/service"],
+      "test_files": ["internal/service/refund_test.go"],
+      "run": "TestUnit_ChannelNotify|TestUnit_HandleAbnormalPaymentGuards|TestUnit_ShipGuards|TestRule_ChannelNotifyPermission",
+      "requires": ["F3.4"],
+      "assertions": ["买家不能确认渠道退款成功", "迟到支付进异常列表不重占库存", "发货唯一性", "渠道重复通知幂等"]
+    },
+    {
+      "id": "F3.6",
+      "stage": 3,
+      "type": "unit",
+      "title": "五大场景与规则 8 回归",
+      "rule_ref": "general/acceptance.md §2 五大场景",
+      "modules": ["internal/service"],
+      "test_files": ["internal/service/service_test.go"],
+      "run": "TestScenario|TestRule8_LedgerAppendOnly",
+      "requires": ["F3.3", "F3.5"],
+      "assertions": ["正常成交 / 缺货弃单 / 售前退款 / 迟到支付 / 操作异常全通过", "流水只增不改"]
+    },
+    {
+      "id": "F3.7",
+      "stage": 3,
+      "type": "unit",
+      "title": "越权与访问边界、缓存一致性",
+      "rule_ref": "frontend/permission.md / backend/constraints.md 铁律-越权",
+      "modules": ["internal/service"],
+      "test_files": ["internal/service/service_extra_test.go"],
+      "run": "TestOrders_RoleBranches|TestRefundsAndAbnormals_AccessControl|TestGetOrder_EdgeCases|TestProducts_CacheAside|TestService_Reset",
+      "requires": ["F3.6"],
+      "assertions": ["买家只看自己的单", "四角色分支全覆盖", "商品读走 Cache-Aside"]
+    },
+    {
+      "id": "F4.1",
+      "stage": 4,
+      "type": "unit",
+      "title": "HTTP 会话 / 身份解析 / 四角色权限矩阵 / 错误码",
+      "rule_ref": "frontend/permission.md / general/acceptance.md 场景 5",
+      "modules": ["internal/api"],
+      "test_files": ["internal/api/server_test.go"],
+      "run": "TestAPI_MetaAndStatic|TestAPI_SessionAndActorResolution|TestAPI_NoopCacheSessionDisabled|TestAPI_RoleGuardMatrix|TestAPI_ErrorMappingAndBadRequest",
+      "requires": ["F3.7"],
+      "assertions": ["403 权限矩阵", "400/403/404/409 错误码映射", "静态托管可用"]
+    },
+    {
+      "id": "F4.2",
+      "stage": 4,
+      "type": "unit",
+      "title": "下单流程 / 买家数据隔离 / 渠道越权回归",
+      "rule_ref": "frontend/permission.md §3 数据隔离 / issue-log 越权修复条",
+      "modules": ["internal/api"],
+      "test_files": ["internal/api/server_test.go"],
+      "run": "TestAPI_OrderFlowOverHTTP|TestAPI_BuyerDataIsolation|TestAPI_ChannelNotifyPermissionRegression|TestAPI_PaymentNotifyRejectionEnvelope",
+      "requires": ["F4.1"],
+      "assertions": ["HTTP 端到端下单到发货", "买家越权 403 且无状态改动", "渠道回调不接受买家身份"]
+    },
+    {
+      "id": "F4.3",
+      "stage": 4,
+      "type": "unit",
+      "title": "生产环境安全守卫",
+      "rule_ref": "README 部署节 / backend/tech-stack.md §3",
+      "modules": ["internal/api"],
+      "test_files": ["internal/api/security_test.go"],
+      "run": "TestSecurity_",
+      "requires": ["F4.1"],
+      "assertions": ["生产模式必须设置密码", "生产禁用演示端点与请求头降级", "生产会话要求 Redis"]
+    },
+    {
+      "id": "F5.1",
+      "stage": 5,
+      "type": "gate",
+      "title": "覆盖率门禁 ≥85%（整体 + 核心业务包）",
+      "rule_ref": "general/unit-test.md T8 / scripts/coverage_gate.py",
+      "modules": [],
+      "test_files": [],
+      "run": "",
+      "requires": ["F4.2", "F4.3"],
+      "assertions": ["整体覆盖率 ≥85%", "api/cache/model/service/store 每包 ≥85%"],
+      "commands": [
+        {"name": "coverage profile", "cmd": ["go", "test", "./...", "-count=1", "-covermode=atomic", "-coverprofile=.agent/workflow/gate-records/F5.1-coverage.out"]},
+        {"name": "coverage gate", "cmd": ["python", "scripts/coverage_gate.py", ".agent/workflow/gate-records/F5.1-coverage.out"]}
+      ]
+    },
+    {
+      "id": "F5.2",
+      "stage": 5,
+      "type": "gate",
+      "needs_service": true,
+      "title": "五大场景 HTTP 一键验收（48 项断言）",
+      "rule_ref": "general/acceptance.md §2、§3",
+      "modules": [],
+      "test_files": [],
+      "run": "",
+      "requires": ["F5.1"],
+      "assertions": ["正常成交 / 缺货弃单 / 售前退款 / 迟到支付 / 操作异常全 PASS", "无超卖/重复收款/重复释放/越权四类硬错误"],
+      "commands": [
+        {"name": "acceptance", "cmd": ["python", "scripts/acceptance_check.py", "--base", "http://127.0.0.1:8090"]}
+      ]
+    },
+    {
+      "id": "F5.3",
+      "stage": 5,
+      "type": "gate",
+      "title": "全量回归（提交前最后一道闸门）",
+      "rule_ref": "general/acceptance.md §1",
+      "modules": [],
+      "test_files": [],
+      "run": "",
+      "requires": ["F5.2"],
+      "assertions": ["go test -race -count=1 ./... 全绿"],
+      "commands": [
+        {"name": "full regression", "cmd": ["go", "test", "-race", "-count=1", "./..."]}
+      ]
+    }
+  ]
+}

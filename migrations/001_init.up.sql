@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS orders (
   abnormal_id       VARCHAR(64)  NULL,
   status_updated_at DATETIME(3)  NOT NULL,
   INDEX idx_orders_status (status),
+  -- 超时关单扫描专用：候选查询 WHERE status='PENDING_PAY' AND expires_at<=? 走本索引，
+  -- 代价只与「已过期待付款订单数」成正比，与订单总量无关
+  INDEX idx_orders_status_exp (status, expires_at),
   INDEX idx_orders_buyer (buyer_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

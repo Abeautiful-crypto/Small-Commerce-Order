@@ -1,0 +1,26 @@
+{"ts": "2026-11-11 16:22", "commit": "3db6d6e", "type": "init", "summary": "Initial commit（建仓与首提交同分钟，created_at 16:22:31）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-11 16:xx", "commit": "55890e3", "type": "feat", "summary": "订单交易系统后端与存储实现（internal/**，8规则，参数化SQL，CAS）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-11 17:00", "commit": "9a136fa", "type": "feat", "summary": "拼多多风格前端页面（四角色入口+异常态）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-11 17:00", "commit": "c3d6f52", "type": "test", "summary": "单元/集成测试与一键验收脚本（acceptance_check.py 雏形）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-11 17:xx", "commit": "da99e65", "type": "docs", "summary": "需求约束文档与 README（角色/规则/假设）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-11 22:11", "commit": "df912e0", "type": "feat", "summary": "服务器一键部署脚本", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-11 22:11", "commit": "0dbaf5d", "type": "feat", "summary": "Docker 与 1Panel 部署配置", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-11 22:11+", "commit": "b028347", "type": "merge", "summary": "PR #1: 覆盖率门禁与 CI 说明（test 检查后合并）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 09:01", "commit": "75a6921", "type": "docs", "summary": "补充任务规划/事件清单/AI 使用说明等过程产物（整改期）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 10:30", "commit": "2151219", "type": "feat", "summary": "新增 CI 流水线（测试+覆盖率门禁+构建+部署冒烟）、Makefile、测试报告", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 10:40", "commit": "0a51fd6", "type": "docs", "summary": "README 测试节补充覆盖率门禁与 CI 说明", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 10:40", "commit": "6365c53", "type": "test", "summary": "补齐 model/cache/service/store 单测，核心包≥85%（miniredis+sqlmock）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 11:00", "commit": "47b891f", "type": "opt", "summary": "重构 main.go 薄启动层，装配抽入 internal/app 提升可测试性", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 11:20", "commit": "faea701", "type": "fix", "summary": "修复 #E-108 缓存写不失效导致可售数量展示旧值", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 11:27", "commit": "7eb94f8", "type": "docs", "summary": "归档独立验收 Agent 会话记录（48/48、89.63%、硬错误 NONE）", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 11:27", "commit": "a720be1", "type": "merge", "summary": "PR #2: v1.2.0 过程产物", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 12:20", "commit": "dea7c1a", "type": "fix", "summary": "CI 部署闭环：deploy 手动触发，健康检查/冒烟走 80 端口反代入口", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 12:20", "commit": "3a1a3ac", "type": "fix", "summary": "验收脚本新增只读 --smoke，CI 生产冒烟改只读验收", "source": "git log (real)", "owner": "student"}
+{"ts": "2026-11-12 12:45", "commit": "d63f7db", "type": "merge", "summary": "PR #6: 提示词归档/建仓取证/CI 手动触发（HEAD=线上版本）", "source": "git log (real)", "owner": "student"}
+{"ts": "", "commit": "", "type": "stage", "summary": "[requirements] 需求约束文档 da99e65 / 需求docx（2026-11-11 17:xx 前）", "source": "阶段映射（真实时序）", "owner": "student"}
+{"ts": "", "commit": "", "type": "stage", "summary": "[prototype] 前端原型 9a136fa（2026-11-11 17:00）", "source": "阶段映射（真实时序）", "owner": "student"}
+{"ts": "", "commit": "", "type": "stage", "summary": "[planning] 任务规划 75a6921（2026-11-12 09:01 整改期补写，晚于开发，如实标注）", "source": "阶段映射（真实时序）", "owner": "student"}
+{"ts": "", "commit": "", "type": "stage", "summary": "[development] 后端 55890e3 + 测试 6365c53 + 重构 47b891f + 修复 faea701", "source": "阶段映射（真实时序）", "owner": "student"}
+{"ts": "", "commit": "", "type": "stage", "summary": "[testing] 单元测试 6365c53（整体89.63%，核心包≥85%）", "source": "阶段映射（真实时序）", "owner": "student"}
+{"ts": "", "commit": "", "type": "stage", "summary": "[acceptance] 验收 Agent 会话 7eb94f8（48/48、硬错误 NONE）", "source": "阶段映射（真实时序）", "owner": "student"}
+{"ts": "", "commit": "", "type": "stage", "summary": "[deployment] CI d63f7db + 线上 115.190.238.75:80（d63f7db 一致）", "source": "阶段映射（真实时序）", "owner": "student"}

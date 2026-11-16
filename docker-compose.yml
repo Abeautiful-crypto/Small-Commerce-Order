@@ -13,7 +13,8 @@ services:
     # 不挂载 env_file：app 容器只需要下列变量，不应接触 MYSQL_ROOT_PASSWORD。
     environment:
       APP_ENV: production
-      APP_ADDR: ":8090"
+      APP_ADDR: ":8090"   # C 端买家页
+      APP_ADDR_B: ":8091" # B 端工作台
       APP_STORE: mysql
       APP_WEB: "./web"
       APP_MIGRATIONS: "./migrations"
@@ -25,7 +26,8 @@ services:
       # 1 = 免密码登录（仅演示/预览）：仍强制会话令牌、角色隔离，演示接口不注册。
       APP_LOGIN_PASSWORDLESS: "${APP_LOGIN_PASSWORDLESS:-0}"
     ports:
-      - "127.0.0.1:8090:8090"
+      - "127.0.0.1:8090:8090"  # C 端买家页
+      - "127.0.0.1:8091:8091"  # B 端工作台
     depends_on:
       mysql:
         condition: service_healthy

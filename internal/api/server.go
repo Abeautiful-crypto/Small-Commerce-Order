@@ -22,6 +22,7 @@ type Server struct {
 	production   bool              // 生产模式：强制会话令牌 + 密码登录，禁用演示接口
 	passwordless bool              // 生产模式下免密码登录（仅演示/预览，仍签发会话令牌）
 	passwords    map[string]string // 用户 ID → 密码（仅生产模式使用，由环境变量注入）
+	side         string            // 本实例托管的端：c=C端买家页 / b=B端工作台 / ""=不限制（测试与脚本）
 }
 
 func New(svc *service.Service, webDir string, c cache.Cache) *Server {
@@ -53,6 +54,45 @@ func (s *Server) Env() string {
 		return "production"
 	}
 	return "demo"
+}
+
+// WithSide 把实例绑定到某个端：登录接口只发放该端角色，
+// 首页返回该端页面，跨端令牌一律拒绝。
+func (s *Server) WithSide(side string) *Server {
+	s.side = side
+	return s
+}
+
+// Side 返回实例所属端。
+func (s *Server) Side() string { return s.side }
+
+// entryFile 返回该端的首页文件。
+func (s *Server) entryFile() string {
+	if s.side == model.SideBusiness {
+		return "business.html"
+	}
+	return "customer.html"
+}
+
+// checkSide 拦截「拿着 B 端令牌访问 C 端接口」这类跨端复用：
+// 令牌角色由服务端会话给出，前端无法伪造。
+func (s *Server) checkSide(r *http.Request) error {
+	if s.side == "" {
+		return nil
+	}
+	token := r.Header.Get("X-Token")
+	if token == "" {
+		return nil // 无令牌（演示头部身份）由角色权限守卫负责
+	}
+	role, _, ok := s.cache.LoadSession(token)
+	if !ok {
+		return nil
+	}
+	if model.SideOf(model.Role(role)) != s.side {
+		return &service.BizError{Code: service.CodeForbidden,
+			Message: model.SideLabel(model.SideOf(model.Role(role))) + "账号的会话不能用于 " + model.SideLabel(s.side) + " 页面"}
+	}
+	return nil
 }
 
 type envelope struct {
@@ -92,6 +132,10 @@ func writeErr(w http.ResponseWriter, err error) {
 // h 将业务方法包装成统一响应。
 func (s *Server) h(fn func(*http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := s.checkSide(r); err != nil {
+			writeErr(w, err)
+			return
+		}
 		data, err := fn(r)
 		if err != nil {
 			writeErr(w, err)
@@ -147,9 +191,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/meta", s.h(func(r *http.Request) (any, error) {
 		users := []model.User{}
 		for _, u := range model.Users {
-			if u.Role != model.RoleChannel {
-				users = append(users, u)
+			if u.Role == model.RoleChannel {
+				continue
 			}
+			// 按端裁剪账号列表：C 端只有买家，B 端只有工作台角色
+			if s.side != "" && model.SideOf(u.Role) != s.side {
+				continue
+			}
+			users = append(users, u)
 		}
 		labels := map[string]string{}
 		for k, v := range model.StatusLabels {
@@ -158,6 +207,7 @@ func (s *Server) Handler() http.Handler {
 		return map[string]any{
 			"users": users, "statusLabels": labels,
 			"env": s.Env(), "loginPasswordless": s.passwordless,
+			"side": s.side, "sideLabel": model.SideLabel(s.side),
 		}, nil
 	}))
 
@@ -176,6 +226,14 @@ func (s *Server) Handler() http.Handler {
 		u, ok := model.FindUser(req.UserID, role)
 		if !ok || role == model.RoleChannel {
 			writeErr(w, &service.BizError{Code: service.CodeForbidden, Message: "账号不存在或角色不匹配"})
+			return
+		}
+		// 登录端硬校验：账号角色必须属于当前页面所在的端，
+		// 因此在 C 端用仓库管理员账号登录会被直接拒绝，反之亦然。
+		if s.side != "" && model.SideOf(u.Role) != s.side {
+			need := model.SideLabel(model.SideOf(u.Role))
+			writeErr(w, &service.BizError{Code: service.CodeForbidden,
+				Message: model.SideLabel(s.side) + "页面不接受 " + need + " 账号（" + u.Name + "），请到 " + need + " 页面登录"})
 			return
 		}
 		if s.production && !s.passwordless {
@@ -210,6 +268,17 @@ func (s *Server) Handler() http.Handler {
 	// ---------- 商品 ----------
 	mux.HandleFunc("GET /api/products", s.h(func(r *http.Request) (any, error) {
 		return s.svc.Products(s.actorFrom(r))
+	}))
+	mux.HandleFunc("POST /api/products", s.h(func(r *http.Request) (any, error) {
+		var req struct {
+			Name     string `json:"name"`
+			PriceFen int64  `json:"priceFen"`
+			Stock    int64  `json:"stock"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			return nil, err
+		}
+		return s.svc.CreateProduct(s.actorFrom(r), req.Name, req.PriceFen, req.Stock)
 	}))
 	mux.HandleFunc("POST /api/products/{id}/onsale", s.h(func(r *http.Request) (any, error) {
 		var req struct {
@@ -383,6 +452,15 @@ func (s *Server) Handler() http.Handler {
 		}
 		// 强制浏览器回源校验：避免前端改动后被旧 app.js / style.css 缓存掩盖
 		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		// 两个端各自有独立入口页：C 端 buyer 页、B 端工作台页
+		if s.side != "" && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
+			clone := r.Clone(r.Context())
+			cp := *r.URL
+			cp.Path = "/" + s.entryFile()
+			clone.URL = &cp
+			fs.ServeHTTP(w, clone)
+			return
+		}
 		fs.ServeHTTP(w, r)
 	}))
 	return mux

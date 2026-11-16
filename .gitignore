@@ -1,5 +1,6 @@
 # 构建产物
 /.build/
+/build/
 
 # 覆盖率产物（证据快照固定提交在 docs/coverage/）
 /coverage.out

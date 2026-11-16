@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -25,6 +26,10 @@ type StateStore interface {
 	Snapshot() (*model.State, error)
 	Reset() error
 	Close() error
+	// PendingExpiredIDs 返回已到期的待付款订单 ID（超时关单候选集）。
+	// MySQL 实现走 (status, expires_at) 复合索引的范围扫描，代价只与过期单数量相关，
+	// 使后台扫描不必加载全量状态；内存实现直接遍历内存态（本来就 O(N)）。
+	PendingExpiredIDs(before time.Time, limit int) ([]string, error)
 }
 
 type Store struct {
@@ -155,6 +160,29 @@ func (s *Store) invalidateChangedStock(before, after *model.State) {
 	if ids := changedStockIDs(before, after); len(ids) > 0 {
 		s.cache.InvalidateStock(ids...)
 	}
+}
+
+// PendingExpiredIDs 内存实现的候选集查询：在只读锁下遍历内存态，
+// 语义与 MySQL 版一致（仅待付款且已到期，按到期时间升序，最多 limit 条）。
+func (s *Store) PendingExpiredIDs(before time.Time, limit int) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	matched := []*model.Order{}
+	for _, o := range s.state.Orders {
+		if o.Status != model.StatusPendingPay || o.ExpiresAt.After(before) {
+			continue
+		}
+		matched = append(matched, o)
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].ExpiresAt.Before(matched[j].ExpiresAt) })
+	if limit > 0 && len(matched) > limit {
+		matched = matched[:limit]
+	}
+	ids := make([]string, 0, len(matched))
+	for _, o := range matched {
+		ids = append(ids, o.ID)
+	}
+	return ids, nil
 }
 
 // Snapshot 返回状态深拷贝，供查询层自由遍历（不持锁、无数据竞争）。

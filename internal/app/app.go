@@ -28,7 +28,8 @@ const (
 
 // Config 是进程启动所需的全部配置。
 type Config struct {
-	Addr         string
+	Addr         string // C 端（买家页）监听地址
+	AddrB        string // B 端（工作台）监听地址，与 C 端分端口独立部署
 	Secret       string
 	Web          string
 	StoreKind    string
@@ -54,7 +55,8 @@ func LoadConfig(args []string, getenv func(string) string) (*Config, error) {
 	}
 	fs := flag.NewFlagSet("small-commerce-order", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	addr := fs.String("addr", get("APP_ADDR", ":8090"), "HTTP 监听地址")
+	addr := fs.String("addr", get("APP_ADDR", ":8090"), "C 端页面（买家）监听地址")
+	addrB := fs.String("addr-b", get("APP_ADDR_B", ":8091"), "B 端页面（工作台）监听地址")
 	secret := fs.String("secret", get("APP_CHANNEL_SECRET", demoSecret), "模拟支付渠道验签密钥")
 	web := fs.String("web", get("APP_WEB", "./web"), "前端静态目录")
 	storeKind := fs.String("store", get("APP_STORE", "mysql"), "存储：mysql（真相源）| memory（零依赖回退）")
@@ -71,7 +73,7 @@ func LoadConfig(args []string, getenv func(string) string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Addr: *addr, Secret: *secret, Web: *web, StoreKind: *storeKind,
+		Addr: *addr, AddrB: *addrB, Secret: *secret, Web: *web, StoreKind: *storeKind,
 		DSN: *dsn, Migrations: *migrations,
 		RedisAddr: *redisAddr, RedisPass: *redisPass, DataPath: *data,
 		Env: *envMode, Passwordless: *passwordless, PasswordsRaw: *passwordsRaw,
@@ -86,6 +88,12 @@ func LoadConfig(args []string, getenv func(string) string) (*Config, error) {
 func (c *Config) validate() error {
 	if c.Env != "demo" && c.Env != "production" {
 		return fmt.Errorf("未知 -env 值：%s（可选 demo / production）", c.Env)
+	}
+	if c.Addr == "" || c.AddrB == "" {
+		return errors.New("C 端与 B 端监听地址都不能为空")
+	}
+	if c.Addr == c.AddrB {
+		return fmt.Errorf("C 端与 B 端必须使用不同端口：%s", c.Addr)
 	}
 	if c.Env != "production" {
 		return nil
@@ -167,7 +175,8 @@ func defaultRedisOpener(addr, pass string) (cache.Cache, io.Closer, error) {
 
 // Stack 是装配完成的应用组件集合。
 type Stack struct {
-	Server     *api.Server
+	Server     *api.Server // C 端（买家页）
+	ServerB    *api.Server // B 端（工作台）
 	Service    *service.Service
 	Cache      cache.Cache
 	Store      store.StateStore
@@ -241,14 +250,19 @@ func Build(cfg *Config, openRedis redisOpener) (*Stack, error) {
 
 	stack.Service = service.New(st, cfg.Secret, nil).WithCache(c)
 
-	server := api.New(stack.Service, cfg.Web, c)
-	if production {
-		server = server.WithSecurity(cfg.Passwords)
-		if cfg.Passwordless {
-			server = server.WithPasswordless()
+	// 两个端各自一个 Server 实例：共享服务与缓存，但登录端与首页不同。
+	newServer := func(side string) *api.Server {
+		srv := api.New(stack.Service, cfg.Web, c).WithSide(side)
+		if production {
+			srv = srv.WithSecurity(cfg.Passwords)
+			if cfg.Passwordless {
+				srv = srv.WithPasswordless()
+			}
 		}
+		return srv
 	}
-	stack.Server = server
+	stack.Server = newServer(model.SideCustomer)
+	stack.ServerB = newServer(model.SideBusiness)
 	return stack, nil
 }
 
@@ -272,12 +286,25 @@ func Run(cfg *Config) error {
 		}
 	}()
 
-	srv := &http.Server{
+	srvC := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           stack.Server.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("订单交易系统已启动：http://localhost%s  env=%s store=%s redis=%s web=%s",
-		cfg.Addr, cfg.Env, cfg.StoreKind, stack.RedisState, cfg.Web)
-	return srv.ListenAndServe()
+	srvB := &http.Server{
+		Addr:              cfg.AddrB,
+		Handler:           stack.ServerB.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	errCh := make(chan error, 2)
+	go func() {
+		log.Printf("C 端买家页面已启动：http://localhost%s  env=%s store=%s redis=%s web=%s",
+			cfg.Addr, cfg.Env, cfg.StoreKind, stack.RedisState, cfg.Web)
+		errCh <- srvC.ListenAndServe()
+	}()
+	go func() {
+		log.Printf("B 端工作台已启动：http://localhost%s", cfg.AddrB)
+		errCh <- srvB.ListenAndServe()
+	}()
+	return <-errCh
 }

@@ -113,6 +113,10 @@ func OpenMySQL(cfg MySQLConfig, c cache.Cache, now func() time.Time) (*MySQLStor
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensureIndexes(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensureSeed(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -161,6 +165,55 @@ func (s *MySQLStore) migrate(dir string) error {
 		}
 	}
 	return nil
+}
+
+// ensureIndexes 幂等补建既有库缺失的索引（MySQL 不支持 CREATE INDEX IF NOT EXISTS）。
+// 新装库由 001 建表语句直接带上；老库升级走这里，避免重放迁移报重复索引。
+func (s *MySQLStore) ensureIndexes() error {
+	type idx struct{ table, name, ddl string }
+	want := []idx{
+		{"orders", "idx_orders_status_exp",
+			"CREATE INDEX idx_orders_status_exp ON orders (status, expires_at)"},
+	}
+	for _, w := range want {
+		var n int
+		err := s.db.QueryRow(`SELECT COUNT(*) FROM information_schema.statistics
+			WHERE table_schema=DATABASE() AND table_name=? AND index_name=?`, w.table, w.name).Scan(&n)
+		if err != nil {
+			return fmt.Errorf("检查索引 %s 失败：%w", w.name, err)
+		}
+		if n == 0 {
+			if _, err := s.db.Exec(w.ddl); err != nil {
+				return fmt.Errorf("创建索引 %s 失败：%w", w.name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// PendingExpiredIDs 超时关单候选集：只取已到期的待付款订单主键。
+// 走 (status, expires_at) 复合索引的范围扫描，代价 ∝ 过期订单数，与订单总量无关；
+// 按到期时间升序 + LIMIT，保证单轮批量有界。
+func (s *MySQLStore) PendingExpiredIDs(before time.Time, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	rows, err := s.db.Query(`SELECT id FROM orders
+		WHERE status='PENDING_PAY' AND expires_at<=?
+		ORDER BY expires_at LIMIT ?`, before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查询超时候选订单失败：%w", err)
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *MySQLStore) ensureSeed() error {

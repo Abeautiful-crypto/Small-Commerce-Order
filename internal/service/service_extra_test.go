@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"small-commerce-order/internal/model"
 )
@@ -169,6 +170,9 @@ func (failingStore) Update(fn func(*model.State) error) error { return errors.Ne
 func (failingStore) Snapshot() (*model.State, error)          { return nil, errors.New("store down") }
 func (failingStore) Reset() error                             { return errors.New("store down") }
 func (failingStore) Close() error                             { return nil }
+func (failingStore) PendingExpiredIDs(time.Time, int) ([]string, error) {
+	return nil, errors.New("store down")
+}
 
 // Reset 恢复种子数据（内存与 MySQL 两种后端均应幂等）。
 func TestService_Reset(t *testing.T) {

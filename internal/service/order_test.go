@@ -222,3 +222,50 @@ func TestUnit_CloseExpiredNoSideEffect(t *testing.T) {
 		t.Fatalf("空扫描不得产生流水：%d → %d", len(st0.Ledger), len(st1.Ledger))
 	}
 }
+
+// 候选集路径的关单行为：只关候选命中的过期待付款单，未到期的不动，幂等且释放一次库存。
+func TestUnit_CloseExpiredViaCandidates(t *testing.T) {
+	h := newHarness(t)
+	before := h.available(t, "P1")
+	expiredA, err := h.svc.CreateOrder(buyer1, "P1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredB, err := h.svc.CreateOrder(buyer2, "P1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.advance(11 * time.Minute) // 两单同刻创建，此后均已超时
+
+	// 超时后再下一条新单：它未到期，不应被本轮关闭
+	fresh, err := h.svc.CreateOrder(buyer3, "P1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := h.svc.CloseExpiredOrders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("应关闭两条到期待付款单，实际 %d", n)
+	}
+	assertStatus(t, h.order(t, expiredA.ID), model.StatusClosed)
+	assertStatus(t, h.order(t, expiredB.ID), model.StatusClosed)
+	assertStatus(t, h.order(t, fresh.ID), model.StatusPendingPay)
+	// 释放 2+1 件，新单占用 1 件：available = before - 1
+	if got := h.available(t, "P1"); got != before-1 {
+		t.Fatalf("库存应为初值-1（新单占用），期望 %d，实际 %d", before-1, got)
+	}
+
+	// 幂等：再扫一遍应为 0，且不产生新流水
+	st0, _ := h.svc.State(ops)
+	n, err = h.svc.CloseExpiredOrders()
+	if err != nil || n != 0 {
+		t.Fatalf("重复扫描不应再关闭订单：n=%d err=%v", n, err)
+	}
+	st1, _ := h.svc.State(ops)
+	if len(st1.Ledger) != len(st0.Ledger) {
+		t.Fatalf("重复扫描不得产生流水：%d → %d", len(st0.Ledger), len(st1.Ledger))
+	}
+}
