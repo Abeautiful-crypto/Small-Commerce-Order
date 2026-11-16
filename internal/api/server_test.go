@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"small-commerce-order/internal/account"
 	"small-commerce-order/internal/cache"
 	"small-commerce-order/internal/model"
 	"small-commerce-order/internal/service"
@@ -89,6 +90,70 @@ type apiHarness struct {
 	svc     *service.Service
 	st      store.StateStore
 	cache   *memCache
+	addrMap map[string]string
+}
+
+// addrFor 懒创建一个收货地址（下单必须选本人地址）。
+func (h *apiHarness) addrFor(t *testing.T, actor model.Actor, token string) string {
+	t.Helper()
+	key := actor.UserID + "|" + token
+	if h.addrMap == nil {
+		h.addrMap = map[string]string{}
+	}
+	if id, ok := h.addrMap[key]; ok {
+		return id
+	}
+	code, env := h.request(t, http.MethodPost, "/api/addresses", map[string]any{
+		"name": "测试收货人", "phone": "13812345678",
+		"region": "浙江省 杭州市 西湖区", "detail": "文一路 1 号", "isDefault": true,
+	}, actor, token)
+	if code != http.StatusOK {
+		t.Fatalf("创建地址失败：%d %+v", code, env.Error)
+	}
+	id, _ := asMap(t, env.Data)["id"].(string)
+	h.addrMap[key] = id
+	return id
+}
+
+// TestAPI_AddressCRUD 地址增删改查与越权：修改走 PUT，他人地址不可改不可删。
+func TestAPI_AddressCRUD(t *testing.T) {
+	h := newAPIHarness(t)
+	id := h.addrFor(t, buyerB, "")
+
+	code, env := h.request(t, http.MethodPut, "/api/addresses/"+id, map[string]any{
+		"name": "李收货", "phone": "13812345679",
+		"region": "江苏省 南京市 玄武区", "detail": "中山路 2 号", "isDefault": true,
+	}, buyerB, "")
+	assertCode(t, code, env, http.StatusOK, "")
+	if got := asMap(t, env.Data); got["name"] != "李收货" || got["region"] != "江苏省 南京市 玄武区" {
+		t.Fatalf("修改结果异常：%+v", got)
+	}
+
+	// 非本人：改 / 删 / 设默认都应 404（按地址不存在处理，不泄露他人地址）
+	code, env = h.request(t, http.MethodPut, "/api/addresses/"+id, map[string]any{
+		"name": "盗用", "phone": "13812345670", "region": "x", "detail": "y",
+	}, buyerA, "")
+	assertCode(t, code, env, http.StatusNotFound, service.CodeNotFound)
+	code, env = h.request(t, http.MethodDelete, "/api/addresses/"+id, nil, buyerA, "")
+	assertCode(t, code, env, http.StatusNotFound, service.CodeNotFound)
+	code, env = h.request(t, http.MethodPost, "/api/addresses/"+id+"/default", map[string]any{}, buyerA, "")
+	assertCode(t, code, env, http.StatusNotFound, service.CodeNotFound)
+
+	// 本人删除成功，列表里随之消失
+	code, env = h.request(t, http.MethodDelete, "/api/addresses/"+id, nil, buyerB, "")
+	assertCode(t, code, env, http.StatusOK, "")
+	code, env = h.request(t, http.MethodGet, "/api/addresses", nil, buyerB, "")
+	assertCode(t, code, env, http.StatusOK, "")
+	if list := asSlice(t, env.Data); len(list) != 0 {
+		t.Fatalf("删除后地址列表应为空，实际 %d 条", len(list))
+	}
+}
+
+// orderBody 组装带支付方式与收货地址的下单请求体。
+func orderBody(t *testing.T, h *apiHarness, actor model.Actor, token, pid string, qty int) map[string]any {
+	return map[string]any{
+		"productId": pid, "qty": qty, "channel": "alipay", "addressId": h.addrFor(t, actor, token),
+	}
 }
 
 // 传入 passwords 即启用生产模式；不传则为默认 demo 模式。
@@ -107,7 +172,7 @@ func newAPIHarness(t *testing.T, security ...map[string]string) *apiHarness {
 		[]byte("<!doctype html><title>acceptance</title>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	server := New(svc, webDir, c)
+	server := New(svc, webDir, c, account.NewMemRepo())
 	if len(security) > 0 {
 		server = server.WithSecurity(security[0])
 	}
@@ -195,8 +260,8 @@ func TestAPI_MetaAndStatic(t *testing.T) {
 	code, env := h.request(t, http.MethodGet, "/api/meta", nil, model.Actor{}, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	d := asMap(t, env.Data)
-	if _, ok := d["users"]; !ok {
-		t.Fatal("meta 缺少 users")
+	if _, leaked := d["users"]; leaked {
+		t.Fatal("meta 不应下发账号清单")
 	}
 	if _, ok := d["statusLabels"]; !ok {
 		t.Fatal("meta 缺少 statusLabels")
@@ -210,7 +275,7 @@ func TestAPI_MetaAndStatic(t *testing.T) {
 func TestAPI_SessionAndActorResolution(t *testing.T) {
 	h := newAPIHarness(t)
 	code, env := h.request(t, http.MethodPost, "/api/session",
-		map[string]string{"role": "buyer", "userId": "u002"}, model.Actor{}, "")
+		map[string]string{"phone": "13800000002"}, model.Actor{}, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	sess := asMap(t, env.Data)
 	token, _ := sess["token"].(string)
@@ -220,7 +285,7 @@ func TestAPI_SessionAndActorResolution(t *testing.T) {
 
 	// 仅凭 X-Token 即可还原身份
 	code, env = h.request(t, http.MethodPost, "/api/orders",
-		map[string]any{"productId": "P1", "qty": 1}, model.Actor{}, token)
+		orderBody(t, h, model.Actor{}, token, "P1", 1), model.Actor{}, token)
 	assertCode(t, code, env, http.StatusOK, "")
 	if got := asMap(t, env.Data)["buyerId"]; got != "u002" {
 		t.Fatalf("token 身份还原错误：buyerId=%v", got)
@@ -240,10 +305,18 @@ func TestAPI_SessionAndActorResolution(t *testing.T) {
 		model.Actor{Role: model.RoleOps, UserID: "u001"}, "")
 	assertCode(t, code, env, http.StatusForbidden, service.CodeForbidden)
 
-	// 非法账号登录被拒
+	// 不存在的账号登录被拒（角色不再由请求体决定，伪造 role 无效）
 	code, env = h.request(t, http.MethodPost, "/api/session",
-		map[string]string{"role": "ops", "userId": "u001"}, model.Actor{}, "")
+		map[string]string{"phone": "13800000000"}, model.Actor{}, "")
 	assertCode(t, code, env, http.StatusForbidden, service.CodeForbidden)
+
+	// 伪造 role=ops 也没用：u001 是买家账号，服务端按账号表判定角色
+	code, env = h.request(t, http.MethodPost, "/api/session",
+		map[string]string{"phone": "13800000001", "password": "123456"}, model.Actor{}, "")
+	assertCode(t, code, env, http.StatusOK, "")
+	if role := asMap(t, asMap(t, env.Data)["user"])["role"]; role != string(model.RoleBuyer) {
+		t.Fatalf("登录角色必须来自账号表（买家），实际 %v", role)
+	}
 }
 
 func TestAPI_NoopCacheSessionDisabled(t *testing.T) {
@@ -252,9 +325,9 @@ func TestAPI_NoopCacheSessionDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := service.New(st, "secret", nil)
-	h := &apiHarness{handler: New(svc, t.TempDir(), cache.Noop{}).Handler()}
+	h := &apiHarness{handler: New(svc, t.TempDir(), cache.Noop{}, account.NewMemRepo()).Handler()}
 	code, env := h.request(t, http.MethodPost, "/api/session",
-		map[string]string{"role": "buyer", "userId": "u001"}, model.Actor{}, "")
+		map[string]string{"phone": "13800000001"}, model.Actor{}, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	if got := asMap(t, env.Data)["sessionEnabled"]; got != false {
 		t.Fatalf("Redis 不可用时 sessionEnabled 应为 false，实际 %v", got)
@@ -319,7 +392,7 @@ func TestAPI_ErrorMappingAndBadRequest(t *testing.T) {
 func TestAPI_OrderFlowOverHTTP(t *testing.T) {
 	h := newAPIHarness(t)
 	code, env := h.request(t, http.MethodPost, "/api/orders",
-		map[string]any{"productId": "P1", "qty": 1}, buyerB, "")
+		orderBody(t, h, buyerB, "", "P1", 1), buyerB, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	order := asMap(t, env.Data)
 	id, _ := order["id"].(string)
@@ -363,7 +436,7 @@ func TestAPI_OrderFlowOverHTTP(t *testing.T) {
 func TestAPI_BuyerDataIsolation(t *testing.T) {
 	h := newAPIHarness(t)
 	code, env := h.request(t, http.MethodPost, "/api/orders",
-		map[string]any{"productId": "P2", "qty": 1}, buyerB, "")
+		orderBody(t, h, buyerB, "", "P2", 1), buyerB, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	id, _ := asMap(t, env.Data)["id"].(string)
 
@@ -389,7 +462,7 @@ func TestAPI_BuyerDataIsolation(t *testing.T) {
 func TestAPI_ChannelNotifyPermissionRegression(t *testing.T) {
 	h := newAPIHarness(t)
 	code, env := h.request(t, http.MethodPost, "/api/orders",
-		map[string]any{"productId": "P2", "qty": 1}, buyerB, "")
+		orderBody(t, h, buyerB, "", "P2", 1), buyerB, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	id, _ := asMap(t, env.Data)["id"].(string)
 
@@ -429,7 +502,7 @@ func TestAPI_ChannelNotifyPermissionRegression(t *testing.T) {
 func TestAPI_PaymentNotifyRejectionEnvelope(t *testing.T) {
 	h := newAPIHarness(t)
 	code, env := h.request(t, http.MethodPost, "/api/orders",
-		map[string]any{"productId": "P1", "qty": 1}, buyerB, "")
+		orderBody(t, h, buyerB, "", "P1", 1), buyerB, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	id, _ := asMap(t, env.Data)["id"].(string)
 	code, env = h.request(t, http.MethodPost, "/api/orders/"+id+"/pay-intent", map[string]string{}, buyerB, "")

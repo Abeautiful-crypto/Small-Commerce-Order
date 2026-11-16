@@ -13,20 +13,20 @@ import (
 func TestUnit_CreateOrderValidation(t *testing.T) {
 	h := newHarness(t)
 	for _, qty := range []int{-1, 0, 3} {
-		if _, err := h.svc.CreateOrder(buyer1, "P1", qty); errCode(err) != CodeBadRequest {
+		if _, err := h.svc.CreateOrder(buyer1, "P1", qty, "alipay", ""); errCode(err) != CodeBadRequest {
 			t.Fatalf("数量 %d 应被参数校验拒绝，实际 %v", qty, err)
 		}
 	}
-	if _, err := h.svc.CreateOrder(buyer1, "NO-SUCH", 1); errCode(err) != CodeNotFound {
+	if _, err := h.svc.CreateOrder(buyer1, "NO-SUCH", 1, "alipay", h.addr(buyer1)); errCode(err) != CodeNotFound {
 		t.Fatalf("未知商品应返回 NOT_FOUND，实际 %v", err)
 	}
-	if _, err := h.svc.CreateOrder(ops, "P1", 1); errCode(err) != CodeForbidden {
+	if _, err := h.svc.CreateOrder(ops, "P1", 1, "alipay", h.addr(ops)); errCode(err) != CodeForbidden {
 		t.Fatalf("非买家下单应被拒绝，实际 %v", err)
 	}
 	if err := h.svc.SetOnSale(ops, "P1", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.svc.CreateOrder(buyer1, "P1", 1); errCode(err) != CodeConflict {
+	if _, err := h.svc.CreateOrder(buyer1, "P1", 1, "alipay", h.addr(buyer1)); errCode(err) != CodeConflict {
 		t.Fatalf("下架商品不可购买，实际 %v", err)
 	}
 	if err := h.svc.SetOnSale(ops, "P1", true); err != nil {
@@ -39,7 +39,7 @@ func TestUnit_CreateOrderValidation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.svc.CreateOrder(buyer1, "P1", 2); errCode(err) != CodeConflict {
+	if _, err := h.svc.CreateOrder(buyer1, "P1", 2, "alipay", h.addr(buyer1)); errCode(err) != CodeConflict {
 		t.Fatalf("可售不足应返回 CONFLICT，实际 %v", err)
 	}
 	if got := h.available(t, "P1"); got != 1 {
@@ -72,7 +72,7 @@ func TestUnit_SetOnSaleGuards(t *testing.T) {
 func TestUnit_CancelAndCloseIdempotency(t *testing.T) {
 	h := newHarness(t)
 	before := h.available(t, "P1")
-	o, err := h.svc.CreateOrder(buyer2, "P1", 1)
+	o, err := h.svc.CreateOrder(buyer2, "P1", 1, "alipay", h.addr(buyer2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestUnit_CancelAndCloseIdempotency(t *testing.T) {
 
 func TestUnit_PaymentNotifyRejections(t *testing.T) {
 	h := newHarness(t)
-	o, err := h.svc.CreateOrder(buyer2, "P1", 1)
+	o, err := h.svc.CreateOrder(buyer2, "P1", 1, "alipay", h.addr(buyer2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestUnit_PaymentNotifyIgnoredOnShipped(t *testing.T) {
 func TestUnit_AutoCloseBeforeLateNotify(t *testing.T) {
 	h := newHarness(t)
 	before := h.available(t, "P1")
-	o, err := h.svc.CreateOrder(buyer3, "P1", 1)
+	o, err := h.svc.CreateOrder(buyer3, "P1", 1, "alipay", h.addr(buyer3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestUnit_AutoCloseBeforeLateNotify(t *testing.T) {
 
 func TestUnit_ForceExpireGuards(t *testing.T) {
 	h := newHarness(t)
-	o, err := h.svc.CreateOrder(buyer2, "P1", 1)
+	o, err := h.svc.CreateOrder(buyer2, "P1", 1, "alipay", h.addr(buyer2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,18 +227,18 @@ func TestUnit_CloseExpiredNoSideEffect(t *testing.T) {
 func TestUnit_CloseExpiredViaCandidates(t *testing.T) {
 	h := newHarness(t)
 	before := h.available(t, "P1")
-	expiredA, err := h.svc.CreateOrder(buyer1, "P1", 2)
+	expiredA, err := h.svc.CreateOrder(buyer1, "P1", 2, "alipay", h.addr(buyer1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	expiredB, err := h.svc.CreateOrder(buyer2, "P1", 1)
+	expiredB, err := h.svc.CreateOrder(buyer2, "P1", 1, "alipay", h.addr(buyer2))
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.advance(11 * time.Minute) // 两单同刻创建，此后均已超时
 
 	// 超时后再下一条新单：它未到期，不应被本轮关闭
-	fresh, err := h.svc.CreateOrder(buyer3, "P1", 1)
+	fresh, err := h.svc.CreateOrder(buyer3, "P1", 1, "alipay", h.addr(buyer3))
 	if err != nil {
 		t.Fatal(err)
 	}

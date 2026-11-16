@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"small-commerce-order/internal/account"
 	"small-commerce-order/internal/api"
 	"small-commerce-order/internal/cache"
 	"small-commerce-order/internal/model"
@@ -125,11 +126,10 @@ func (c *Config) validate() error {
 	if err != nil {
 		return err
 	}
-	for _, u := range model.Users {
-		if u.Role != model.RoleChannel {
-			if _, ok := p[u.ID]; !ok {
-				return fmt.Errorf("生产模式缺少账号 %s 的密码配置", u.ID)
-			}
+	// APP_PASSWORDS 以「11 位手机号」为键（登录账号即手机号）
+	for _, s := range account.Seed {
+		if _, ok := p[s.Phone]; !ok {
+			return fmt.Errorf("生产模式缺少手机号 %s 的密码配置", s.Phone)
 		}
 	}
 	c.Passwords = p
@@ -180,6 +180,7 @@ type Stack struct {
 	Service    *service.Service
 	Cache      cache.Cache
 	Store      store.StateStore
+	Accounts   account.Repo
 	RedisState string // disabled / unavailable / connected(addr)
 
 	redisCloser io.Closer
@@ -221,6 +222,7 @@ func Build(cfg *Config, openRedis redisOpener) (*Stack, error) {
 	}
 
 	var st store.StateStore
+	var accounts account.Repo
 	switch cfg.StoreKind {
 	case "memory":
 		if production {
@@ -231,6 +233,7 @@ func Build(cfg *Config, openRedis redisOpener) (*Stack, error) {
 			return nil, fmt.Errorf("初始化内存存储失败：%w", err)
 		}
 		st = mem.WithCache(c) // memory 存储同样遵循「写提交后失效库存缓存」
+		accounts = account.NewMemRepo()
 	case "mysql":
 		ms, err := store.OpenMySQL(store.MySQLConfig{
 			DSN:            cfg.DSN,
@@ -242,17 +245,30 @@ func Build(cfg *Config, openRedis redisOpener) (*Stack, error) {
 			return nil, fmt.Errorf("初始化 MySQL 真相源失败：%w", err)
 		}
 		st = ms
+		// 账号真相源：users（买家）/ staff（运营、仓库、客服）
+		repo := account.NewMySQLRepo(ms.DB())
+		if err := repo.EnsureSchema(time.Now()); err != nil {
+			return nil, fmt.Errorf("初始化账号表失败：%w", err)
+		}
+		accounts = repo
 	default:
 		return nil, fmt.Errorf("未知 -store 值：%s（可选 mysql / memory）", cfg.StoreKind)
 	}
 	stack.Store = st
 	stack.Cache = c
+	stack.Accounts = accounts
+	// 账号表是身份真相源：同步到身份目录，权限守卫按「ID + 角色」精确匹配。
+	dir := make([]model.User, 0, 8)
+	for _, a := range accounts.List() {
+		dir = append(dir, model.User{ID: a.ID, Name: a.Name, Role: a.Role})
+	}
+	model.SetDirectory(dir)
 
 	stack.Service = service.New(st, cfg.Secret, nil).WithCache(c)
 
-	// 两个端各自一个 Server 实例：共享服务与缓存，但登录端与首页不同。
+	// 两个端各自一个 Server 实例：共享服务、缓存与账号表，但登录端与首页不同。
 	newServer := func(side string) *api.Server {
-		srv := api.New(stack.Service, cfg.Web, c).WithSide(side)
+		srv := api.New(stack.Service, cfg.Web, c, accounts).WithSide(side)
 		if production {
 			srv = srv.WithSecurity(cfg.Passwords)
 			if cfg.Passwordless {

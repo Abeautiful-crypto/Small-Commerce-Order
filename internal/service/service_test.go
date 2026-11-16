@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,8 @@ type harness struct {
 	st      store.StateStore
 	nano    atomic.Int64
 	advance func(time.Duration)
+	addrMu  sync.Mutex
+	addrMap map[string]string // 每个测试实例独立的地址缓存（状态是隔离的，不能跨实例复用 ID）
 }
 
 // mysqlBackendDSN 决定场景测试用的库。未显式指定 SERVICE_MYSQL_DSN 时，
@@ -121,12 +124,34 @@ func (h *harness) pay(t *testing.T, buyer model.Actor, orderID string) string {
 
 func (h *harness) createPaidOrder(t *testing.T, buyer model.Actor, productID string, qty int) *model.Order {
 	t.Helper()
-	o, err := h.svc.CreateOrder(buyer, productID, qty)
+	o, err := h.svc.CreateOrder(buyer, productID, qty, "alipay", h.addr(buyer))
 	if err != nil {
 		t.Fatalf("下单失败：%v", err)
 	}
 	h.pay(t, buyer, o.ID)
 	return h.order(t, o.ID)
+}
+
+// addr 懒创建并缓存一个测试收货地址（下单必须选本人地址）。
+func (h *harness) addr(b model.Actor) string {
+	h.addrMu.Lock()
+	defer h.addrMu.Unlock()
+	if h.addrMap == nil {
+		h.addrMap = map[string]string{}
+	}
+	if id, ok := h.addrMap[b.UserID]; ok {
+		return id
+	}
+	phone := "138" + fmt.Sprintf("%08d", len(h.addrMap)+1)
+	a, err := h.svc.AddAddress(b, AddressInput{
+		Name: "收货人-" + b.Name, Phone: phone,
+		Region: "浙江省 杭州市 西湖区", Detail: "文三路 100 号 2 幢 301",
+	})
+	if err != nil {
+		return "" // 非买家角色等场景：返回空，由 CreateOrder 的角色守卫先行拦截
+	}
+	h.addrMap[b.UserID] = a.ID
+	return a.ID
 }
 
 func assertStatus(t *testing.T, o *model.Order, want model.OrderStatus) {
@@ -154,14 +179,14 @@ func TestScenario1_NormalDeal(t *testing.T) {
 	if err := h.svc.SetOnSale(ops, "P2", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.svc.CreateOrder(buyer2, "P2", 1); errCode(err) != CodeConflict {
+	if _, err := h.svc.CreateOrder(buyer2, "P2", 1, "alipay", h.addr(buyer2)); errCode(err) != CodeConflict {
 		t.Fatalf("下架商品应不可购买，实际 %v", err)
 	}
 	if err := h.svc.SetOnSale(ops, "P2", true); err != nil {
 		t.Fatal(err)
 	}
 
-	o, err := h.svc.CreateOrder(buyer2, "P1", 2)
+	o, err := h.svc.CreateOrder(buyer2, "P1", 2, "alipay", h.addr(buyer2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +252,7 @@ func TestScenario2_NoOversellAndRelease(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			o, err := h.svc.CreateOrder(buyers[i%3], "P1", 1)
+			o, err := h.svc.CreateOrder(buyers[i%3], "P1", 1, "alipay", h.addr(buyers[i%3]))
 			if err == nil {
 				mu.Lock()
 				created = append(created, o)
@@ -270,7 +295,7 @@ func TestScenario2_NoOversellAndRelease(t *testing.T) {
 	if got := h.available(t, "P1"); got != 1 {
 		t.Fatalf("重复取消导致重复释放：可售 %d", got)
 	}
-	if _, err := h.svc.CreateOrder(buyer3, "P1", 1); err != nil {
+	if _, err := h.svc.CreateOrder(buyer3, "P1", 1, "alipay", h.addr(buyer3)); err != nil {
 		t.Fatalf("释放的量应可被其他买家买到：%v", err)
 	}
 	if got := h.available(t, "P1"); got != 0 {
@@ -282,7 +307,7 @@ func TestScenario2_NoOversellAndRelease(t *testing.T) {
 func TestScenario2_TimeoutCloseIsIdempotent(t *testing.T) {
 	h := newHarness(t)
 	before := h.available(t, "P1")
-	o, err := h.svc.CreateOrder(buyer1, "P1", 1)
+	o, err := h.svc.CreateOrder(buyer1, "P1", 1, "alipay", h.addr(buyer1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +407,7 @@ func TestScenario3_RejectRefundThenShip(t *testing.T) {
 func TestScenario4_LatePayment(t *testing.T) {
 	h := newHarness(t)
 	before := h.available(t, "P1")
-	o, err := h.svc.CreateOrder(buyer3, "P1", 1)
+	o, err := h.svc.CreateOrder(buyer3, "P1", 1, "alipay", h.addr(buyer3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +504,7 @@ func TestScenario5_RaceIdempotencyPermission(t *testing.T) {
 	}
 
 	// 重复支付通知：同一渠道交易号只处理一次
-	o2, _ := h.svc.CreateOrder(buyer1, "P2", 1)
+	o2, _ := h.svc.CreateOrder(buyer1, "P2", 1, "alipay", h.addr(buyer1))
 	intent, err := h.svc.CreatePaymentIntent(buyer1, o2.ID)
 	if err != nil {
 		t.Fatal(err)

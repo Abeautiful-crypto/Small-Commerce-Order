@@ -177,7 +177,7 @@ func (failingStore) PendingExpiredIDs(time.Time, int) ([]string, error) {
 // Reset 恢复种子数据（内存与 MySQL 两种后端均应幂等）。
 func TestService_Reset(t *testing.T) {
 	h := newHarness(t)
-	if _, err := h.svc.CreateOrder(buyer1, "P1", 1); err != nil {
+	if _, err := h.svc.CreateOrder(buyer1, "P1", 1, "alipay", h.addr(buyer1)); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.svc.Reset(ops); err != nil {

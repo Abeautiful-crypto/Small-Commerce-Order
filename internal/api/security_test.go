@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	"small-commerce-order/internal/account"
 	"small-commerce-order/internal/cache"
 	"small-commerce-order/internal/model"
 	"small-commerce-order/internal/service"
@@ -13,9 +14,16 @@ import (
 // 生产模式单测：验证「真实登录 + 只认会话令牌 + 禁用演示接口」三道防线。
 // 密码与密钥均来自配置，测试中只使用假值，不涉及任何真实凭据。
 
+// 登录账号是 11 位手机号，因此密码配置也以手机号为键。
+const (
+	phoneBuyer1 = "13800000001"
+	phoneBuyer2 = "13800000002"
+	phoneOps    = "13900000001"
+)
+
 var testPasswords = map[string]string{
-	"u001": "pw-buyer-1", "u002": "pw-buyer-2", "u003": "pw-buyer-3",
-	"admin": "pw-ops", "wh": "pw-wh", "cs": "pw-cs",
+	"13800000001": "pw-buyer-1", "13800000002": "pw-buyer-2", "13800000003": "pw-buyer-3",
+	"13900000001": "pw-ops", "13900000002": "pw-wh", "13900000003": "pw-cs",
 }
 
 func prodHarness(t *testing.T) *apiHarness {
@@ -42,14 +50,14 @@ func TestSecurity_ProductionRequiresPassword(t *testing.T) {
 	h := prodHarness(t)
 	login := func(pwd string) (int, envelope) {
 		return h.request(t, http.MethodPost, "/api/session",
-			map[string]string{"role": "buyer", "userId": "u001", "password": pwd}, model.Actor{}, "")
+			map[string]string{"phone": "13800000001", "password": pwd}, model.Actor{}, "")
 	}
 	code, env := login("")
 	assertCode(t, code, env, http.StatusForbidden, service.CodeForbidden)
 	code, env = login("wrong-password")
 	assertCode(t, code, env, http.StatusForbidden, service.CodeForbidden)
 
-	code, env = login(testPasswords["u001"])
+	code, env = login(testPasswords[phoneBuyer1])
 	assertCode(t, code, env, http.StatusOK, "")
 	token, _ := asMap(t, env.Data)["token"].(string)
 	if token == "" {
@@ -89,7 +97,7 @@ func TestSecurity_DemoEndpointsDisabledInProduction(t *testing.T) {
 
 	// 业务接口仍然存在（只是需要令牌）
 	code, env = h.request(t, http.MethodPost, "/api/session",
-		map[string]string{"role": "ops", "userId": "admin", "password": testPasswords["admin"]}, model.Actor{}, "")
+		map[string]string{"phone": "13900000001", "password": testPasswords[phoneOps]}, model.Actor{}, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	token, _ := asMap(t, env.Data)["token"].(string)
 	code, env = h.request(t, http.MethodGet, "/api/summary", nil, model.Actor{}, token)
@@ -105,10 +113,10 @@ func TestSecurity_ProductionSessionRequiresRedis(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := service.New(st, "strong-secret", nil)
-	server := New(svc, t.TempDir(), cache.Noop{}).WithSecurity(testPasswords)
+	server := New(svc, t.TempDir(), cache.Noop{}, account.NewMemRepo()).WithSecurity(testPasswords)
 	h := &apiHarness{handler: server.Handler()}
 	code, env := h.request(t, http.MethodPost, "/api/session",
-		map[string]string{"role": "buyer", "userId": "u001", "password": testPasswords["u001"]}, model.Actor{}, "")
+		map[string]string{"phone": "13800000001", "password": testPasswords[phoneBuyer1]}, model.Actor{}, "")
 	if code != http.StatusInternalServerError || env.OK {
 		t.Fatalf("Redis 不可用时生产模式必须拒绝登录：code=%d env=%+v", code, env)
 	}
@@ -117,7 +125,7 @@ func TestSecurity_ProductionSessionRequiresRedis(t *testing.T) {
 func TestSecurity_ProductionRoleGuardStillApplies(t *testing.T) {
 	h := prodHarness(t)
 	code, env := h.request(t, http.MethodPost, "/api/session",
-		map[string]string{"role": "buyer", "userId": "u002", "password": testPasswords["u002"]}, model.Actor{}, "")
+		map[string]string{"phone": "13800000002", "password": testPasswords[phoneBuyer2]}, model.Actor{}, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	token, _ := asMap(t, env.Data)["token"].(string)
 
@@ -148,7 +156,7 @@ func passwordlessHarness(t *testing.T) *apiHarness {
 	}
 	c := newMemCache()
 	svc := service.New(st, "strong-secret", nil).WithCache(c)
-	server := New(svc, t.TempDir(), c).WithSecurity(nil).WithPasswordless()
+	server := New(svc, t.TempDir(), c, account.NewMemRepo()).WithSecurity(nil).WithPasswordless()
 	return &apiHarness{handler: server.Handler(), svc: svc, st: st, cache: c}
 }
 
@@ -168,7 +176,7 @@ func TestSecurity_PasswordlessLogin(t *testing.T) {
 
 	// 空密码即可登录，并签发会话令牌
 	code, env = h.request(t, http.MethodPost, "/api/session",
-		map[string]string{"role": "buyer", "userId": "u001", "password": ""}, model.Actor{}, "")
+		map[string]string{"phone": "13800000001", "password": ""}, model.Actor{}, "")
 	assertCode(t, code, env, http.StatusOK, "")
 	token, _ := asMap(t, env.Data)["token"].(string)
 	if token == "" {
@@ -191,6 +199,6 @@ func TestSecurity_PasswordlessLogin(t *testing.T) {
 func TestSecurity_PasswordlessOffStillRequiresPassword(t *testing.T) {
 	h := prodHarness(t)
 	code, env := h.request(t, http.MethodPost, "/api/session",
-		map[string]string{"role": "buyer", "userId": "u001", "password": ""}, model.Actor{}, "")
+		map[string]string{"phone": "13800000001", "password": ""}, model.Actor{}, "")
 	assertCode(t, code, env, http.StatusForbidden, service.CodeForbidden)
 }

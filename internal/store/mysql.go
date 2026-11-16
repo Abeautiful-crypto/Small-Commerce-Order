@@ -121,10 +121,18 @@ func OpenMySQL(cfg MySQLConfig, c cache.Cache, now func() time.Time) (*MySQLStor
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensureCatalog(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
 func (s *MySQLStore) Close() error { return s.db.Close() }
+
+// DB 暴露底层连接池，供账号仓库（users / staff 表）复用同一连接，
+// 避免为登录再开一套连接配置。
+func (s *MySQLStore) DB() *sql.DB { return s.db }
 
 // ---------------- 迁移与预置 ----------------
 
@@ -290,7 +298,8 @@ func (s *MySQLStore) Reset() error {
 	if err := lockTx(tx); err != nil {
 		return err
 	}
-	for _, table := range []string{"ledger", "abnormal_payments", "shipments", "refunds", "notify_results", "payments", "orders", "products"} {
+	for _, table := range []string{"addresses", "chat_msgs", "reviews", "product_ops", "ledger", "abnormal_payments", "shipments",
+		"refunds", "notify_results", "payments", "orders", "products"} {
 		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
 			return err
 		}
@@ -305,7 +314,11 @@ func (s *MySQLStore) Reset() error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.cache.InvalidateStock("P1", "P2")
+	ids := make([]string, 0, len(demoProducts()))
+	for _, p := range demoProducts() {
+		ids = append(ids, p.ID)
+	}
+	s.cache.InvalidateStock(ids...)
 	return nil
 }
 
@@ -320,14 +333,14 @@ func loadState(q queryer) (*model.State, error) {
 	norm := normalize(&model.State{})
 	st := &norm
 
-	rows, err := q.Query("SELECT id,name,image,price_fen,old_price_fen,total,available,on_sale,sales FROM products ORDER BY id")
+	rows, err := q.Query("SELECT id,name,image,category,price_fen,old_price_fen,total,available,on_sale,sales FROM products ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		p := &model.Product{}
 		var onSale int8
-		if err := rows.Scan(&p.ID, &p.Name, &p.Image, &p.PriceFen, &p.OldPriceFen, &p.Total, &p.Available, &onSale, &p.Sales); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Image, &p.Category, &p.PriceFen, &p.OldPriceFen, &p.Total, &p.Available, &onSale, &p.Sales); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -341,6 +354,7 @@ func loadState(q queryer) (*model.State, error) {
 	rows.Close()
 
 	rows, err = q.Query(`SELECT id,buyer_id,buyer_name,product_id,product_name,product_image,price_fen,qty,amount_fen,
+		channel,receiver_name,receiver_phone,receiver_address,
 		status,created_at,expires_at,closed_at,paid_at,channel_txn_id,refund_id,shipment_id,abnormal_id,status_updated_at
 		FROM orders ORDER BY created_at,id`)
 	if err != nil {
@@ -351,7 +365,9 @@ func loadState(q queryer) (*model.State, error) {
 		var closed, paid sql.NullTime
 		var txnID, refundID, shipmentID, abnormalID sql.NullString
 		if err := rows.Scan(&o.ID, &o.BuyerID, &o.BuyerName, &o.ProductID, &o.ProductName, &o.ProductImage,
-			&o.PriceFen, &o.Qty, &o.AmountFen, &o.Status, &o.CreatedAt, &o.ExpiresAt,
+			&o.PriceFen, &o.Qty, &o.AmountFen,
+			&o.Channel, &o.ReceiverName, &o.ReceiverPhone, &o.ReceiverAddress,
+			&o.Status, &o.CreatedAt, &o.ExpiresAt,
 			&closed, &paid, &txnID, &refundID, &shipmentID, &abnormalID, &o.StatusUpdatedAt); err != nil {
 			rows.Close()
 			return nil, err
@@ -420,15 +436,21 @@ func loadState(q queryer) (*model.State, error) {
 	}
 	rows.Close()
 
-	rows, err = q.Query("SELECT id,order_id,carrier,tracking_no,created_at,operator FROM shipments ORDER BY created_at,id")
+	rows, err = q.Query("SELECT id,order_id,carrier,tracking_no,created_at,operator,signed_at,signed_by FROM shipments ORDER BY created_at,id")
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		sh := &model.Shipment{}
-		if err := rows.Scan(&sh.ID, &sh.OrderID, &sh.Carrier, &sh.TrackingNo, &sh.CreatedAt, &sh.Operator); err != nil {
+		var signedAt sql.NullTime
+		if err := rows.Scan(&sh.ID, &sh.OrderID, &sh.Carrier, &sh.TrackingNo, &sh.CreatedAt, &sh.Operator,
+			&signedAt, &sh.SignedBy); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if signedAt.Valid {
+			t := signedAt.Time
+			sh.SignedAt = &t
 		}
 		st.Shipments = append(st.Shipments, sh)
 	}
@@ -466,6 +488,62 @@ func loadState(q queryer) (*model.State, error) {
 			return nil, err
 		}
 		st.Ledger = append(st.Ledger, l)
+	}
+	rows.Close()
+
+	rows, err = q.Query("SELECT id,type,product_id,name,operator,created_at FROM product_ops ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		op := &model.ProductOp{}
+		if err := rows.Scan(&op.ID, &op.Type, &op.ProductID, &op.Name, &op.Operator, &op.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		st.ProductOps = append(st.ProductOps, op)
+	}
+	rows.Close()
+
+	rows, err = q.Query("SELECT id,product_id,order_id,parent_id,buyer_id,buyer_name,content,created_at FROM reviews ORDER BY created_at,id")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		r := &model.Review{}
+		if err := rows.Scan(&r.ID, &r.ProductID, &r.OrderID, &r.ParentID, &r.BuyerID, &r.BuyerName, &r.Content, &r.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		st.Reviews = append(st.Reviews, r)
+	}
+	rows.Close()
+
+	rows, err = q.Query("SELECT id,order_id,from_role,from_id,from_name,kind,body,created_at FROM chat_msgs ORDER BY created_at,id")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		m := &model.ChatMsg{}
+		if err := rows.Scan(&m.ID, &m.OrderID, &m.FromRole, &m.FromID, &m.FromName, &m.Kind, &m.Text, &m.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		st.ChatMsgs = append(st.ChatMsgs, m)
+	}
+	rows.Close()
+
+	rows, err = q.Query("SELECT id,user_id,name,phone,region,detail,is_default,created_at FROM addresses ORDER BY created_at,id")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		a := &model.Address{}
+		if err := rows.Scan(&a.ID, &a.UserID, &a.Name, &a.Phone, &a.Region, &a.Detail, &a.IsDefault, &a.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		st.Addresses = append(st.Addresses, a)
 	}
 	rows.Close()
 
@@ -523,8 +601,8 @@ func persistDiff(tx *sql.Tx, before, after *model.State) ([]string, error) {
 	for _, p := range after.Products {
 		b := before.Product(p.ID)
 		if b == nil {
-			if _, err := tx.Exec(`INSERT INTO products (id,name,image,price_fen,old_price_fen,total,available,on_sale,sales)
-				VALUES (?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Image, p.PriceFen, p.OldPriceFen,
+			if _, err := tx.Exec(`INSERT INTO products (id,name,image,category,price_fen,old_price_fen,total,available,on_sale,sales)
+				VALUES (?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Image, p.Category, p.PriceFen, p.OldPriceFen,
 				p.Total, p.Available, p.OnSale, p.Sales); err != nil {
 				return nil, fmt.Errorf("插入商品失败：%w", err)
 			}
@@ -550,8 +628,8 @@ func persistDiff(tx *sql.Tx, before, after *model.State) ([]string, error) {
 				return nil, err
 			}
 		}
-		if _, err := tx.Exec(`UPDATE products SET name=?,image=?,price_fen=?,old_price_fen=?,total=?,on_sale=?,sales=? WHERE id=?`,
-			p.Name, p.Image, p.PriceFen, p.OldPriceFen, p.Total, p.OnSale, p.Sales, p.ID); err != nil {
+		if _, err := tx.Exec(`UPDATE products SET name=?,image=?,category=?,price_fen=?,old_price_fen=?,total=?,on_sale=?,sales=? WHERE id=?`,
+			p.Name, p.Image, p.Category, p.PriceFen, p.OldPriceFen, p.Total, p.OnSale, p.Sales, p.ID); err != nil {
 			return nil, err
 		}
 		changedProducts = append(changedProducts, p.ID)
@@ -562,11 +640,14 @@ func persistDiff(tx *sql.Tx, before, after *model.State) ([]string, error) {
 		b := before.Order(o.ID)
 		if b == nil {
 			if _, err := tx.Exec(`INSERT INTO orders
-				(id,buyer_id,buyer_name,product_id,product_name,product_image,price_fen,qty,amount_fen,
-				 status,created_at,expires_at,closed_at,paid_at,channel_txn_id,refund_id,shipment_id,abnormal_id,status_updated_at)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+					(id,buyer_id,buyer_name,product_id,product_name,product_image,price_fen,qty,amount_fen,
+					 channel,receiver_name,receiver_phone,receiver_address,
+					 status,created_at,expires_at,closed_at,paid_at,channel_txn_id,refund_id,shipment_id,abnormal_id,status_updated_at)
+					VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				o.ID, o.BuyerID, o.BuyerName, o.ProductID, o.ProductName, o.ProductImage,
-				o.PriceFen, o.Qty, o.AmountFen, o.Status, o.CreatedAt, o.ExpiresAt,
+				o.PriceFen, o.Qty, o.AmountFen,
+				nz(o.Channel), nz(o.ReceiverName), nz(o.ReceiverPhone), nz(o.ReceiverAddress),
+				o.Status, o.CreatedAt, o.ExpiresAt,
 				tp(o.ClosedAt), tp(o.PaidAt), nz(o.ChannelTxnID), nz(o.RefundID), nz(o.ShipmentID),
 				nz(o.AbnormalID), o.StatusUpdatedAt); err != nil {
 				return nil, fmt.Errorf("插入订单失败：%w", err)
@@ -652,15 +733,85 @@ func persistDiff(tx *sql.Tx, before, after *model.State) ([]string, error) {
 		}
 	}
 
-	// ---- 发货记录：order_id UNIQUE 保证只能登记一次 ----
+	// ---- 发货记录：order_id UNIQUE 保证只能登记一次；签收信息回写同一条 ----
 	seenShip := collect(before.Shipments, func(sh *model.Shipment) string { return sh.ID })
 	for _, sh := range after.Shipments {
 		if seenShip[sh.ID] {
+			if b := before.ShipmentByOrder(sh.OrderID); b != nil && !same(b, sh) {
+				if _, err := tx.Exec(`UPDATE shipments SET signed_at=?,signed_by=? WHERE id=? AND signed_at IS NULL`,
+					tp(sh.SignedAt), nz(sh.SignedBy), sh.ID); err != nil {
+					return nil, fmt.Errorf("回写签收信息失败 order=%s：%w", sh.OrderID, err)
+				}
+			}
 			continue
 		}
-		if _, err := tx.Exec(`INSERT INTO shipments (id,order_id,carrier,tracking_no,created_at,operator)
-			VALUES (?,?,?,?,?,?)`, sh.ID, sh.OrderID, sh.Carrier, sh.TrackingNo, sh.CreatedAt, sh.Operator); err != nil {
+		if _, err := tx.Exec(`INSERT INTO shipments (id,order_id,carrier,tracking_no,created_at,operator,signed_at,signed_by)
+			VALUES (?,?,?,?,?,?,?,?)`, sh.ID, sh.OrderID, sh.Carrier, sh.TrackingNo, sh.CreatedAt, sh.Operator,
+			tp(sh.SignedAt), nz(sh.SignedBy)); err != nil {
 			return nil, fmt.Errorf("发货登记冲突（对订单唯一）order=%s：%w", sh.OrderID, err)
+		}
+	}
+
+	// ---- 商品操作记录：只增不改 ----
+	seenOps := collect(before.ProductOps, func(op *model.ProductOp) string { return strconv.FormatInt(op.ID, 10) })
+	for _, op := range after.ProductOps {
+		if seenOps[strconv.FormatInt(op.ID, 10)] {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO product_ops (id,type,product_id,name,operator,created_at) VALUES (?,?,?,?,?,?)`,
+			op.ID, op.Type, op.ProductID, op.Name, op.Operator, op.CreatedAt); err != nil {
+			return nil, fmt.Errorf("写入商品操作记录失败：%w", err)
+		}
+	}
+
+	// ---- 商品评论：只增不改 ----
+	seenReview := collect(before.Reviews, func(r *model.Review) string { return r.ID })
+	for _, r := range after.Reviews {
+		if seenReview[r.ID] {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO reviews (id,product_id,order_id,parent_id,buyer_id,buyer_name,content,created_at)
+			VALUES (?,?,?,?,?,?,?,?)`, r.ID, r.ProductID, r.OrderID, r.ParentID, r.BuyerID, r.BuyerName, r.Content, r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("写入评论失败：%w", err)
+		}
+	}
+
+	// ---- 客服消息：只增不改 ----
+	seenChat := collect(before.ChatMsgs, func(m *model.ChatMsg) string { return m.ID })
+	for _, m := range after.ChatMsgs {
+		if seenChat[m.ID] {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO chat_msgs (id,order_id,from_role,from_id,from_name,kind,body,created_at)
+			VALUES (?,?,?,?,?,?,?,?)`, m.ID, m.OrderID, m.FromRole, m.FromID, m.FromName, m.Kind, m.Text, m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("写入客服消息失败：%w", err)
+		}
+	}
+
+	// ---- 收货地址：新地址插入；内容或默认标记变化时整行更新 ----
+	seenAddr := collect(before.Addresses, func(a *model.Address) string { return a.ID })
+	for _, a := range after.Addresses {
+		if seenAddr[a.ID] {
+			b := before.Address(a.ID)
+			if b != nil && (b.IsDefault != a.IsDefault || b.Name != a.Name || b.Phone != a.Phone ||
+				b.Region != a.Region || b.Detail != a.Detail) {
+				if _, err := tx.Exec(`UPDATE addresses SET name=?,phone=?,region=?,detail=?,is_default=? WHERE id=?`,
+					a.Name, a.Phone, a.Region, a.Detail, a.IsDefault, a.ID); err != nil {
+					return nil, fmt.Errorf("更新地址失败：%w", err)
+				}
+			}
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO addresses (id,user_id,name,phone,region,detail,is_default,created_at)
+			VALUES (?,?,?,?,?,?,?,?)`, a.ID, a.UserID, a.Name, a.Phone, a.Region, a.Detail, a.IsDefault, a.CreatedAt); err != nil {
+			return nil, fmt.Errorf("写入地址失败：%w", err)
+		}
+	}
+	for _, b := range before.Addresses {
+		if after.Address(b.ID) == nil { // 删除地址
+			if _, err := tx.Exec(`DELETE FROM addresses WHERE id=?`, b.ID); err != nil {
+				return nil, fmt.Errorf("删除地址失败：%w", err)
+			}
 		}
 	}
 

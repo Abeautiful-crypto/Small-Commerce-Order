@@ -63,13 +63,27 @@ func TestTransition(t *testing.T) {
 }
 
 func TestIsTerminal(t *testing.T) {
-	if !IsTerminal(StatusShipped) || !IsTerminal(StatusRefunded) {
-		t.Fatal("已发货/已退款应为终态")
+	if !IsTerminal(StatusSigned) || !IsTerminal(StatusRefunded) {
+		t.Fatal("已签收/已退款应为终态")
 	}
-	for _, s := range []OrderStatus{StatusPendingPay, StatusClosed, StatusPendingShip, StatusRefunding, StatusAbnormalPay} {
+	for _, s := range []OrderStatus{StatusPendingPay, StatusClosed, StatusPendingShip, StatusRefunding, StatusShipped, StatusAbnormalPay} {
 		if IsTerminal(s) {
 			t.Fatalf("%s 不应为终态", s)
 		}
+	}
+}
+
+// 已发货 → 已签收 是唯一新增的合法迁移，且签收后不可再迁移。
+func TestTransition_Signed(t *testing.T) {
+	o := &Order{Status: StatusShipped}
+	if err := Transition(o, StatusSigned, time.Now()); err != nil {
+		t.Fatalf("已发货应可签收：%v", err)
+	}
+	if err := Transition(o, StatusRefunded, time.Now()); err == nil {
+		t.Fatal("已签收后不可退款")
+	}
+	if CanTransition(StatusPendingShip, StatusSigned) {
+		t.Fatal("待发货不能直接签收")
 	}
 }
 

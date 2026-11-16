@@ -22,19 +22,25 @@ func (s *Service) SetOnSale(actor model.Actor, productID string, onSale bool) er
 		if !onSale {
 			word = "下架"
 		}
-		st.AppendLedger("商品"+word, 0, "", p.ID, p.Name, s.now())
+		// 商品操作与资金流水分开：资金流水只记钱，商品动作进「商品操作记录」
+		st.AppendProductOp("商品"+word, p.ID, p.Name, actor.Name, s.now())
 		return nil
 	})
 }
 
 // CreateOrder R1：只能在售且数量足够；下单即占用库存；订单保存商品价格快照。
+// 下单必须选定支付方式（wechat / alipay）与收货地址（地址必须是本人的），
+// 地址内容以快照写入订单，之后修改或删除地址不影响历史订单。
 // 写事务串行化 + 临界区内条件判断，等价于 UPDATE products SET available=available-n WHERE available>=n。
-func (s *Service) CreateOrder(actor model.Actor, productID string, qty int) (*model.Order, error) {
+func (s *Service) CreateOrder(actor model.Actor, productID string, qty int, channel, addressID string) (*model.Order, error) {
 	if err := requireRole(actor, model.RoleBuyer); err != nil {
 		return nil, err
 	}
 	if qty < 1 || qty > 2 {
 		return nil, bad("下单数量必须为 1–2 件")
+	}
+	if channel != "wechat" && channel != "alipay" {
+		return nil, bad("支付方式必须是微信支付或支付宝支付")
 	}
 	var out *model.Order
 	err := s.st.Update(func(st *model.State) error {
@@ -48,12 +54,18 @@ func (s *Service) CreateOrder(actor model.Actor, productID string, qty int) (*mo
 		if p.Available < qty {
 			return conflict("可售数量不足，无法下单")
 		}
+		addr := st.Address(addressID)
+		if addr == nil || addr.UserID != actor.UserID {
+			return bad("请先选择本人的收货地址再下单")
+		}
 		now := s.now()
 		p.Available -= qty // 原子占用：条件判断与扣减在同一写事务内
 		o := &model.Order{
 			ID: st.NextID("NO"), BuyerID: actor.UserID, BuyerName: actor.Name,
 			ProductID: p.ID, ProductName: p.Name, ProductImage: p.Image,
 			PriceFen: p.PriceFen, Qty: qty, AmountFen: p.PriceFen * int64(qty),
+			Channel:      channel,
+			ReceiverName: addr.Name, ReceiverPhone: addr.Phone, ReceiverAddress: addr.Full(),
 			Status:    model.StatusPendingPay,
 			CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute), StatusUpdatedAt: now,
 		}

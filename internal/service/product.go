@@ -6,14 +6,62 @@ import (
 	"small-commerce-order/internal/model"
 )
 
+// Categories 是商品可选的分类（与 C 端逛逛页的分类筛选一致）。
+var Categories = []string{"家用电器", "电子产品", "儿童玩具", "书本", "食品", "家居生活", "其他"}
+
+// DefaultCategory 未指定分类时的归属。
+const DefaultCategory = "其他"
+
+// normalizeCategory 校验分类是否在白名单内；空值归入「其他」。
+func normalizeCategory(raw string) (string, error) {
+	c := strings.TrimSpace(raw)
+	if c == "" {
+		return DefaultCategory, nil
+	}
+	for _, ok := range Categories {
+		if c == ok {
+			return c, nil
+		}
+	}
+	return "", bad("商品分类不在允许范围内：" + c)
+}
+
+// normalizeImage 校验商品图片来源：只接受 http(s) 链接或站内 images/、uploads/ 相对路径，
+// 避免把 javascript: / data: 这类可执行伪协议写进 <img src>。
+// 新建商品必须上传图片（由 /api/uploads 落盘后返回站内 URL），不再提供默认占位图。
+func normalizeImage(raw string) (string, error) {
+	img := strings.TrimSpace(raw)
+	if img == "" {
+		return "", bad("请上传商品图片")
+	}
+	if len(img) > 255 {
+		return "", bad("商品图片地址过长（最多 255 字符）")
+	}
+	lower := strings.ToLower(img)
+	for _, prefix := range []string{"https://", "http://", "images/", "/images/", "uploads/", "/uploads/"} {
+		if strings.HasPrefix(lower, prefix) {
+			return img, nil
+		}
+	}
+	return "", bad("商品图片必须是上传后的站内地址或 http(s) 链接")
+}
+
 // CreateProduct 运营新建商品（R8：商品维护属运营职责，创建后默认在售并记流水）。
-func (s *Service) CreateProduct(actor model.Actor, name string, priceFen, stock int64) (*model.Product, error) {
+func (s *Service) CreateProduct(actor model.Actor, name, image, category string, priceFen, stock int64) (*model.Product, error) {
 	if err := requireRole(actor, model.RoleOps); err != nil {
 		return nil, err
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, bad("商品名称不能为空")
+	}
+	img, err := normalizeImage(image)
+	if err != nil {
+		return nil, err
+	}
+	cat, err := normalizeCategory(category)
+	if err != nil {
+		return nil, err
 	}
 	if priceFen <= 0 {
 		return nil, bad("价格必须大于 0")
@@ -22,11 +70,12 @@ func (s *Service) CreateProduct(actor model.Actor, name string, priceFen, stock 
 		return nil, bad("库存不能为负数")
 	}
 	var out *model.Product
-	err := s.st.Update(func(st *model.State) error {
+	err = s.st.Update(func(st *model.State) error {
 		p := &model.Product{
 			ID:          st.NextID("P"),
 			Name:        name,
-			Image:       "images/product1.png", // 新建商品统一占位图，买家端可正常展示
+			Image:       img,
+			Category:    cat,
 			PriceFen:    priceFen,
 			OldPriceFen: priceFen,
 			Total:       int(stock),
@@ -34,7 +83,7 @@ func (s *Service) CreateProduct(actor model.Actor, name string, priceFen, stock 
 			OnSale:      true,
 		}
 		st.Products = append(st.Products, p)
-		st.AppendLedger("商品上架", 0, "", p.ID, "新建商品："+p.Name, s.now())
+		st.AppendProductOp("新增商品", p.ID, p.Name, actor.Name, s.now())
 		out = p
 		return nil
 	})

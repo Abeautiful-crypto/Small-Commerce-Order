@@ -53,8 +53,20 @@ def check(scene, name, ok, expect, actual):
     RESULTS.append((scene, name, "PASS" if ok else "FAIL", str(expect), str(actual)))
 
 
+# 登录账号已统一为 11 位手机号；内部 ID 仅用于请求头身份（actor）。
+PHONES = {
+    "u001": "13800000001",
+    "u002": "13800000002",
+    "u003": "13800000003",
+    "admin": "13900000001",
+    "wh": "13900000002",
+    "cs": "13900000003",
+}
+
+
 def login(role, uid):
-    return payload(call("/api/session", "POST", {"role": role, "userId": uid}))["token"]
+    phone = PHONES.get(uid, uid)
+    return payload(call("/api/session", "POST", {"phone": phone, "password": "123456"}))["token"]
 
 
 def reset():
@@ -78,8 +90,27 @@ def full_state():
     return payload(call("/api/state", actor=("ops", "admin")))
 
 
+_addr_cache = {}
+
+
+def ensure_address(token):
+    """下单必须带本人收货地址；每个买家懒创建一个并缓存。"""
+    if token in _addr_cache:
+        return _addr_cache[token]
+    status, resp = call("/api/addresses", "POST",
+                        {"name": "验收收货人", "phone": "13800001234",
+                         "region": "浙江省 杭州市 西湖区", "detail": "文一路 1 号", "isDefault": True},
+                        token=token)
+    if status != 200:
+        raise RuntimeError("创建地址失败: %s %s" % (status, resp))
+    _addr_cache[token] = resp["data"]["id"]
+    return _addr_cache[token]
+
+
 def new_order(pid, qty, token):
-    return call("/api/orders", "POST", {"productId": pid, "qty": qty}, token=token)
+    return call("/api/orders", "POST",
+                {"productId": pid, "qty": qty, "channel": "alipay",
+                 "addressId": ensure_address(token)}, token=token)
 
 
 def pay(token, oid):

@@ -91,17 +91,26 @@ func normalize(st *model.State) model.State {
 	if st.Ledger == nil {
 		st.Ledger = []*model.LedgerEntry{}
 	}
+	if st.ProductOps == nil {
+		st.ProductOps = []*model.ProductOp{}
+	}
+	if st.Reviews == nil {
+		st.Reviews = []*model.Review{}
+	}
+	if st.ChatMsgs == nil {
+		st.ChatMsgs = []*model.ChatMsg{}
+	}
+	if st.Addresses == nil {
+		st.Addresses = []*model.Address{}
+	}
 	return *st
 }
 
 // newSeed 预置 2 个商品、1 条待发货订单与 1 条收款流水（与原型一致）。
 func newSeed(now time.Time) *model.State {
-	st := &model.State{
-		Products: []*model.Product{
-			{ID: "P1", Name: "无线蓝牙耳机 入耳式降噪 白", Image: "images/product1.png", PriceFen: 10000, OldPriceFen: 19900, Total: 5, Available: 4, OnSale: true, Sales: 12000},
-			{ID: "P2", Name: "坚果零食大礼包 每日坚果 红金礼盒", Image: "images/product2.png", PriceFen: 10000, OldPriceFen: 15900, Total: 8, Available: 8, OnSale: true, Sales: 8600},
-		},
-	}
+	products := demoProducts()
+	// Seq 从商品目录规模起算：新建商品/订单的编号不会与预置的 P1..P12 撞车
+	st := &model.State{Products: products, Seq: int64(len(products))}
 	created := now.Add(-3 * time.Minute)
 	st.Orders = append(st.Orders, &model.Order{
 		ID: "NO20260001", BuyerID: "u001", BuyerName: "张小买",

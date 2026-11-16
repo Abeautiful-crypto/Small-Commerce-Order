@@ -40,7 +40,7 @@ func TestUnit_ApplyRefundGuards(t *testing.T) {
 	if _, err := h.svc.ApplyRefund(buyer2, o.ID, "again"); errCode(err) != CodeConflict {
 		t.Fatalf("重复申请退款应被拒绝，实际 %v", err)
 	}
-	pending, _ := h.svc.CreateOrder(buyer2, "P2", 1)
+	pending, _ := h.svc.CreateOrder(buyer2, "P2", 1, "alipay", h.addr(buyer2))
 	if _, err := h.svc.ApplyRefund(buyer2, pending.ID, "x"); errCode(err) != CodeConflict {
 		t.Fatalf("待付款订单不得申请退款，实际 %v", err)
 	}
@@ -183,7 +183,7 @@ func TestUnit_RetryRefundGuards(t *testing.T) {
 
 func TestUnit_HandleAbnormalPaymentGuards(t *testing.T) {
 	h := newHarness(t)
-	o, err := h.svc.CreateOrder(buyer3, "P1", 1)
+	o, err := h.svc.CreateOrder(buyer3, "P1", 1, "alipay", h.addr(buyer3))
 	if err != nil {
 		t.Fatal(err)
 	}

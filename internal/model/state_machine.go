@@ -10,7 +10,8 @@ import (
 // 待发货   →(申请退款) 退款中 / (登记发货一次) 已发货
 // 退款中   →(拒绝) 待发货 / (同意+渠道成功) 已退款（售前恢复库存）
 // 已关闭   →(迟到成功通知) 异常支付 →(客服核实退款) 已退款（不恢复库存）
-// 已发货 / 已退款 为终态。
+// 已发货   →(买家确认收货) 已签收
+// 已签收 / 已退款 为终态。
 var allowedTransitions = map[OrderStatus]map[OrderStatus]bool{
 	StatusPendingPay: {
 		StatusPendingShip: true,
@@ -30,7 +31,10 @@ var allowedTransitions = map[OrderStatus]map[OrderStatus]bool{
 	StatusAbnormalPay: {
 		StatusRefunded: true,
 	},
-	StatusShipped:  {},
+	StatusShipped: {
+		StatusSigned: true,
+	},
+	StatusSigned:   {},
 	StatusRefunded: {},
 }
 
@@ -52,7 +56,7 @@ func Transition(o *Order, to OrderStatus, at time.Time) error {
 	return nil
 }
 
-// IsTerminal 终态判断。
+// IsTerminal 终态判断：签收与退款是订单的终点；已发货等待买家签收，不算终态。
 func IsTerminal(s OrderStatus) bool {
-	return s == StatusShipped || s == StatusRefunded
+	return s == StatusSigned || s == StatusRefunded
 }

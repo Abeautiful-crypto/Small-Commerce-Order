@@ -53,22 +53,24 @@ func newMockStore(t *testing.T) (*MySQLStore, sqlmock.Sqlmock, *mockCache) {
 
 // expectLoadState 为 loadState 的 8 张表 + meta 注册行数据。
 func expectLoadState(mk sqlmock.Sqlmock, st *model.State) {
-	pRows := sqlmock.NewRows([]string{"id", "name", "image", "price_fen", "old_price_fen", "total", "available", "on_sale", "sales"})
+	pRows := sqlmock.NewRows([]string{"id", "name", "image", "category", "price_fen", "old_price_fen", "total", "available", "on_sale", "sales"})
 	for _, p := range st.Products {
 		onSale := int8(0)
 		if p.OnSale {
 			onSale = 1
 		}
-		pRows.AddRow(p.ID, p.Name, p.Image, p.PriceFen, p.OldPriceFen, p.Total, p.Available, onSale, p.Sales)
+		pRows.AddRow(p.ID, p.Name, p.Image, p.Category, p.PriceFen, p.OldPriceFen, p.Total, p.Available, onSale, p.Sales)
 	}
 	mk.ExpectQuery(regexp.QuoteMeta("FROM products")).WillReturnRows(pRows)
 
 	oRows := sqlmock.NewRows([]string{"id", "buyer_id", "buyer_name", "product_id", "product_name", "product_image",
-		"price_fen", "qty", "amount_fen", "status", "created_at", "expires_at", "closed_at", "paid_at",
+		"price_fen", "qty", "amount_fen", "channel", "receiver_name", "receiver_phone", "receiver_address",
+		"status", "created_at", "expires_at", "closed_at", "paid_at",
 		"channel_txn_id", "refund_id", "shipment_id", "abnormal_id", "status_updated_at"})
 	for _, o := range st.Orders {
 		oRows.AddRow(o.ID, o.BuyerID, o.BuyerName, o.ProductID, o.ProductName, o.ProductImage,
-			o.PriceFen, o.Qty, o.AmountFen, o.Status, o.CreatedAt, o.ExpiresAt,
+			o.PriceFen, o.Qty, o.AmountFen, o.Channel, o.ReceiverName, o.ReceiverPhone, o.ReceiverAddress,
+			o.Status, o.CreatedAt, o.ExpiresAt,
 			nullTime(o.ClosedAt), nullTime(o.PaidAt), nullStr(o.ChannelTxnID), nullStr(o.RefundID),
 			nullStr(o.ShipmentID), nullStr(o.AbnormalID), o.StatusUpdatedAt)
 	}
@@ -95,9 +97,10 @@ func expectLoadState(mk sqlmock.Sqlmock, st *model.State) {
 	}
 	mk.ExpectQuery(regexp.QuoteMeta("FROM refunds")).WillReturnRows(rRows)
 
-	shRows := sqlmock.NewRows([]string{"id", "order_id", "carrier", "tracking_no", "created_at", "operator"})
+	shRows := sqlmock.NewRows([]string{"id", "order_id", "carrier", "tracking_no", "created_at", "operator", "signed_at", "signed_by"})
 	for _, sh := range st.Shipments {
-		shRows.AddRow(sh.ID, sh.OrderID, sh.Carrier, sh.TrackingNo, sh.CreatedAt, sh.Operator)
+		shRows.AddRow(sh.ID, sh.OrderID, sh.Carrier, sh.TrackingNo, sh.CreatedAt, sh.Operator,
+			nullTime(sh.SignedAt), sh.SignedBy)
 	}
 	mk.ExpectQuery(regexp.QuoteMeta("FROM shipments")).WillReturnRows(shRows)
 
@@ -115,6 +118,34 @@ func expectLoadState(mk sqlmock.Sqlmock, st *model.State) {
 		lRows.AddRow(l.ID, l.Type, l.AmountFen, l.OrderID, l.RefID, l.Note, l.CreatedAt)
 	}
 	mk.ExpectQuery(regexp.QuoteMeta("FROM ledger")).WillReturnRows(lRows)
+
+	opRows := sqlmock.NewRows([]string{"id", "type", "product_id", "name", "operator", "created_at"})
+	for _, op := range st.ProductOps {
+		opRows.AddRow(op.ID, op.Type, op.ProductID, op.Name, op.Operator, op.CreatedAt)
+	}
+	mk.ExpectQuery(regexp.QuoteMeta("FROM product_ops")).WillReturnRows(opRows)
+
+	rvRows := sqlmock.NewRows([]string{"id", "product_id", "order_id", "parent_id", "buyer_id", "buyer_name", "content", "created_at"})
+	for _, r := range st.Reviews {
+		rvRows.AddRow(r.ID, r.ProductID, r.OrderID, r.ParentID, r.BuyerID, r.BuyerName, r.Content, r.CreatedAt)
+	}
+	mk.ExpectQuery(regexp.QuoteMeta("FROM reviews")).WillReturnRows(rvRows)
+
+	cmRows := sqlmock.NewRows([]string{"id", "order_id", "from_role", "from_id", "from_name", "kind", "body", "created_at"})
+	for _, m := range st.ChatMsgs {
+		cmRows.AddRow(m.ID, m.OrderID, m.FromRole, m.FromID, m.FromName, m.Kind, m.Text, m.CreatedAt)
+	}
+	mk.ExpectQuery(regexp.QuoteMeta("FROM chat_msgs")).WillReturnRows(cmRows)
+
+	adRows := sqlmock.NewRows([]string{"id", "user_id", "name", "phone", "region", "detail", "is_default", "created_at"})
+	for _, a := range st.Addresses {
+		def := int8(0)
+		if a.IsDefault {
+			def = 1
+		}
+		adRows.AddRow(a.ID, a.UserID, a.Name, a.Phone, a.Region, a.Detail, def, a.CreatedAt)
+	}
+	mk.ExpectQuery(regexp.QuoteMeta("FROM addresses")).WillReturnRows(adRows)
 
 	mk.ExpectQuery(regexp.QuoteMeta("FROM meta")).WillReturnRows(oneRow([]string{"v"}, "5"))
 }
@@ -330,13 +361,14 @@ func TestMySQLStore_Reset(t *testing.T) {
 	s, mk, fc := newMockStore(t)
 	mk.ExpectBegin()
 	mk.ExpectQuery(regexp.QuoteMeta("SELECT id FROM tx_guard")).WillReturnRows(oneRow([]string{"id"}, 1))
-	for _, table := range []string{"ledger", "abnormal_payments", "shipments", "refunds", "notify_results", "payments", "orders", "products"} {
+	for _, table := range []string{"addresses", "chat_msgs", "reviews", "product_ops", "ledger", "abnormal_payments", "shipments", "refunds", "notify_results", "payments", "orders", "products"} {
 		mk.ExpectExec(regexp.QuoteMeta("DELETE FROM " + table)).WillReturnResult(sqlmock.NewResult(0, 0))
 	}
 	mk.ExpectExec(regexp.QuoteMeta("UPDATE meta SET v='0'")).WillReturnResult(sqlmock.NewResult(0, 1))
-	// 种子回播：2 商品 + 1 订单 + 1 支付 + 2 流水 + seq
-	mk.ExpectExec(regexp.QuoteMeta("INSERT INTO products")).WillReturnResult(sqlmock.NewResult(1, 1))
-	mk.ExpectExec(regexp.QuoteMeta("INSERT INTO products")).WillReturnResult(sqlmock.NewResult(2, 1))
+	// 种子回播：整份演示商品目录 + 1 订单 + 1 支付 + 2 流水 + seq
+	for i := range demoProducts() {
+		mk.ExpectExec(regexp.QuoteMeta("INSERT INTO products")).WillReturnResult(sqlmock.NewResult(int64(i+1), 1))
+	}
 	mk.ExpectExec(regexp.QuoteMeta("INSERT INTO orders")).WillReturnResult(sqlmock.NewResult(1, 1))
 	mk.ExpectExec(regexp.QuoteMeta("INSERT INTO payments")).WillReturnResult(sqlmock.NewResult(1, 1))
 	mk.ExpectExec(regexp.QuoteMeta("INSERT INTO ledger")).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -347,8 +379,9 @@ func TestMySQLStore_Reset(t *testing.T) {
 	if err := s.Reset(); err != nil {
 		t.Fatalf("Reset 失败：%v", err)
 	}
-	if len(fc.invalidated) != 2 || fc.invalidated[0] != "P1" || fc.invalidated[1] != "P2" {
-		t.Fatalf("Reset 应失效 P1/P2 缓存，实际 %v", fc.invalidated)
+	want := len(demoProducts())
+	if len(fc.invalidated) != want || fc.invalidated[0] != "P1" || fc.invalidated[1] != "P2" {
+		t.Fatalf("Reset 应失效全部 %d 个商品缓存，实际 %v", want, fc.invalidated)
 	}
 }
 
@@ -369,8 +402,9 @@ func TestMySQLStore_EnsureSeed(t *testing.T) {
 	mk2.ExpectBegin()
 	mk2.ExpectQuery(regexp.QuoteMeta("SELECT id FROM tx_guard")).WillReturnRows(oneRow([]string{"id"}, 1))
 	mk2.ExpectQuery(regexp.QuoteMeta("SELECT COUNT")).WillReturnRows(oneRow([]string{"n"}, 0))
-	mk2.ExpectExec(regexp.QuoteMeta("INSERT INTO products")).WillReturnResult(sqlmock.NewResult(1, 1))
-	mk2.ExpectExec(regexp.QuoteMeta("INSERT INTO products")).WillReturnResult(sqlmock.NewResult(2, 1))
+	for i := range demoProducts() {
+		mk2.ExpectExec(regexp.QuoteMeta("INSERT INTO products")).WillReturnResult(sqlmock.NewResult(int64(i+1), 1))
+	}
 	mk2.ExpectExec(regexp.QuoteMeta("INSERT INTO orders")).WillReturnResult(sqlmock.NewResult(1, 1))
 	mk2.ExpectExec(regexp.QuoteMeta("INSERT INTO payments")).WillReturnResult(sqlmock.NewResult(1, 1))
 	mk2.ExpectExec(regexp.QuoteMeta("INSERT INTO ledger")).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -450,7 +484,7 @@ func TestMySQLStore_Snapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st.Products) != 2 || len(st.Orders) != 1 {
+	if len(st.Products) != len(demoProducts()) || len(st.Orders) != 1 {
 		t.Fatalf("快照内容不符：products=%d orders=%d", len(st.Products), len(st.Orders))
 	}
 	// 订单 NULL 字段应正确映射

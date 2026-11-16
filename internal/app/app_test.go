@@ -81,7 +81,8 @@ func TestLoadConfig_ProductionGuards(t *testing.T) {
 		"APP_MYSQL_DSN":      "app:s3cret@tcp(127.0.0.1:3306)/db?parseTime=true",
 		"APP_REDIS_ADDR":     "127.0.0.1:6379",
 	}
-	fullPwd := "u001:p1,u002:p2,u003:p3,admin:p4,wh:p5,cs:p6"
+	// APP_PASSWORDS 以 11 位手机号为键
+	fullPwd := "13800000001:p1,13800000002:p2,13800000003:p3,13900000001:p4,13900000002:p5,13900000003:p6"
 
 	// 全部护栏通过：密码解析成功
 	env := cloneEnv(base)
@@ -90,7 +91,7 @@ func TestLoadConfig_ProductionGuards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("合法生产配置不应报错：%v", err)
 	}
-	if cfg.Passwords["u001"] != "p1" {
+	if cfg.Passwords["13800000001"] != "p1" {
 		t.Fatalf("密码应解析为 map，实际 %+v", cfg.Passwords)
 	}
 
@@ -119,11 +120,11 @@ func TestLoadConfig_ProductionGuards(t *testing.T) {
 	if _, err := LoadConfig(args5, getenv(env5)); err == nil || !strings.Contains(err.Error(), "Redis") {
 		t.Fatalf("生产缺 Redis 应报错，实际 %v", err)
 	}
-	// 密码缺账号
+	// 密码缺手机号
 	env6 := cloneEnv(env)
-	env6["APP_PASSWORDS"] = "u001:p1"
-	if _, err := LoadConfig(nil, getenv(env6)); err == nil || !strings.Contains(err.Error(), "缺少账号") {
-		t.Fatalf("缺账号密码应报错，实际 %v", err)
+	env6["APP_PASSWORDS"] = "13800000001:p1"
+	if _, err := LoadConfig(nil, getenv(env6)); err == nil || !strings.Contains(err.Error(), "密码配置") {
+		t.Fatalf("缺手机号密码应报错，实际 %v", err)
 	}
 	// 密码格式错误
 	env7 := cloneEnv(env)

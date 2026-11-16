@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"small-commerce-order/internal/account"
 	"small-commerce-order/internal/model"
 	"small-commerce-order/internal/service"
 	"small-commerce-order/internal/store"
@@ -42,7 +43,7 @@ func newSideHarness(t *testing.T, side string) *sideHarness {
 			t.Fatal(err)
 		}
 	}
-	server := New(svc, webDir, c).WithSide(side)
+	server := New(svc, webDir, c, account.NewMemRepo()).WithSide(side)
 	return &sideHarness{handler: server.Handler(), cache: c, webDir: webDir}
 }
 
@@ -72,7 +73,7 @@ func (h *sideHarness) call(t *testing.T, method, path string, body any) (int, en
 // C 端登录接口必须拒绝 B 端角色，并给出「请到 B 端页面登录」的明确提示。
 func TestSideLogin_RejectsWrongSide(t *testing.T) {
 	c := newSideHarness(t, model.SideCustomer)
-	st, env := c.call(t, "POST", "/api/session", map[string]any{"role": "warehouse", "userId": "wh"})
+	st, env := c.call(t, "POST", "/api/session", map[string]any{"phone": "13900000002", "password": "123456"})
 	if st != http.StatusForbidden {
 		t.Fatalf("C 端用仓库账号登录应 403，实际 %d", st)
 	}
@@ -81,7 +82,7 @@ func TestSideLogin_RejectsWrongSide(t *testing.T) {
 	}
 
 	b := newSideHarness(t, model.SideBusiness)
-	st, env = b.call(t, "POST", "/api/session", map[string]any{"role": "buyer", "userId": "u001"})
+	st, env = b.call(t, "POST", "/api/session", map[string]any{"phone": "13800000001", "password": "123456"})
 	if st != http.StatusForbidden {
 		t.Fatalf("B 端用买家账号登录应 403，实际 %d", st)
 	}
@@ -89,37 +90,90 @@ func TestSideLogin_RejectsWrongSide(t *testing.T) {
 		t.Fatalf("拒绝提示应指出应到 C 端登录：%+v", env.Error)
 	}
 	// 正确端的登录必须成功
-	st, env = b.call(t, "POST", "/api/session", map[string]any{"role": "warehouse", "userId": "wh"})
+	st, env = b.call(t, "POST", "/api/session", map[string]any{"phone": "13900000002", "password": "123456"})
 	if st != http.StatusOK || env.Data == nil {
 		t.Fatalf("B 端仓库账号登录应成功，实际 %d %+v", st, env.Error)
 	}
 }
 
-// meta 按端裁剪账号：C 端只有买家，B 端只有工作台角色。
-func TestSideMeta_FiltersUsers(t *testing.T) {
-	c := newSideHarness(t, model.SideCustomer)
-	st, env := c.call(t, "GET", "/api/meta", nil)
-	if st != http.StatusOK {
-		t.Fatalf("meta 应 200，实际 %d", st)
-	}
-	m := env.Data.(map[string]any)
-	if m["side"] != model.SideCustomer {
-		t.Fatalf("C 端 meta.side 应为 c：%v", m["side"])
-	}
-	for _, u := range m["users"].([]any) {
-		role := u.(map[string]any)["role"]
-		if role != string(model.RoleBuyer) {
-			t.Fatalf("C 端账号列表不应出现 %v", role)
+// meta 不下发任何账号清单：登录必须由用户自己输入账号与密码。
+func TestSideMeta_NoAccountList(t *testing.T) {
+	for _, side := range []string{model.SideCustomer, model.SideBusiness} {
+		h := newSideHarness(t, side)
+		st, env := h.call(t, "GET", "/api/meta", nil)
+		if st != http.StatusOK {
+			t.Fatalf("meta 应 200，实际 %d", st)
+		}
+		m := env.Data.(map[string]any)
+		if m["side"] != side {
+			t.Fatalf("meta.side 应为 %s，实际 %v", side, m["side"])
+		}
+		if _, leaked := m["users"]; leaked {
+			t.Fatal("meta 不应下发账号清单（登录只能手输账号密码）")
 		}
 	}
+}
 
-	b := newSideHarness(t, model.SideBusiness)
-	_, env = b.call(t, "GET", "/api/meta", nil)
-	for _, u := range env.Data.(map[string]any)["users"].([]any) {
-		role := u.(map[string]any)["role"]
-		if role == string(model.RoleBuyer) {
-			t.Fatal("B 端账号列表不应出现买家")
+// 登录账号必须是 11 位手机号：旧的 u001 / admin 之类账号一律 400。
+func TestSession_RejectsNonPhoneAccount(t *testing.T) {
+	c := newSideHarness(t, model.SideCustomer)
+	for _, id := range []string{"u001", "admin", "1380000000", "138000000011", "1380000000a"} {
+		st, env := c.call(t, "POST", "/api/session", map[string]any{"phone": id, "password": "123456"})
+		if st != http.StatusBadRequest {
+			t.Fatalf("非 11 位手机号应 400，账号=%s 实际 %d %+v", id, st, env.Error)
 		}
+	}
+}
+
+// 注册：C 端自助注册买家，注册完可直接登录；重复手机号 409、非法手机号 400。
+func TestRegister_ThenLogin(t *testing.T) {
+	c := newSideHarness(t, model.SideCustomer)
+	st, env := c.call(t, "POST", "/api/register", map[string]any{
+		"phone": "13711112222", "password": "abc123456", "name": "新买家",
+	})
+	if st != http.StatusOK {
+		t.Fatalf("注册应 200，实际 %d %+v", st, env.Error)
+	}
+	user := env.Data.(map[string]any)["user"].(map[string]any)
+	if user["role"] != string(model.RoleBuyer) || user["phone"] != "13711112222" {
+		t.Fatalf("注册角色必须是买家，实际 %+v", user)
+	}
+	st, env = c.call(t, "POST", "/api/session", map[string]any{"phone": "13711112222", "password": "abc123456"})
+	if st != http.StatusOK {
+		t.Fatalf("注册后应能登录，实际 %d %+v", st, env.Error)
+	}
+	st, _ = c.call(t, "POST", "/api/register", map[string]any{"phone": "13711112222", "password": "abc123456"})
+	if st != http.StatusConflict {
+		t.Fatalf("重复手机号应 409，实际 %d", st)
+	}
+	st, _ = c.call(t, "POST", "/api/register", map[string]any{"phone": "1371111222", "password": "abc123456"})
+	if st != http.StatusBadRequest {
+		t.Fatalf("非 11 位手机号应 400，实际 %d", st)
+	}
+}
+
+// 登录只认手机号 + 密码，角色由账号表决定：即便请求体伪造 role=ops，也只能拿到买家身份。
+func TestSession_AccountRoleWins(t *testing.T) {
+	c := newSideHarness(t, model.SideCustomer)
+	st, env := c.call(t, "POST", "/api/session", map[string]any{
+		"phone": "13800000001", "password": "123456",
+	})
+	if st != http.StatusOK {
+		t.Fatalf("正确密码应登录成功，实际 %d %+v", st, env.Error)
+	}
+	user := env.Data.(map[string]any)["user"].(map[string]any)
+	if user["role"] != string(model.RoleBuyer) {
+		t.Fatalf("角色必须由账号表给出（买家），实际 %v", user["role"])
+	}
+	// 密码错误必须拒绝
+	st, env = c.call(t, "POST", "/api/session", map[string]any{"phone": "13800000001", "password": "wrong"})
+	if st != http.StatusForbidden {
+		t.Fatalf("错误密码应 403，实际 %d %+v", st, env.Error)
+	}
+	// 不存在的账号也必须拒绝
+	st, _ = c.call(t, "POST", "/api/session", map[string]any{"phone": "13800000000", "password": "123456"})
+	if st != http.StatusForbidden {
+		t.Fatalf("账号不存在应 403，实际 %d", st)
 	}
 }
 
@@ -142,7 +196,7 @@ func TestSideStatic_EntryPage(t *testing.T) {
 // 跨端复用会话令牌：买家令牌只认 C 端，拿到 B 端一律 403。
 func TestSideSession_CrossSideDenied(t *testing.T) {
 	c := newSideHarness(t, model.SideCustomer)
-	st, env := c.call(t, "POST", "/api/session", map[string]any{"role": "buyer", "userId": "u001"})
+	st, env := c.call(t, "POST", "/api/session", map[string]any{"phone": "13800000001", "password": "123456"})
 	if st != http.StatusOK {
 		t.Fatalf("C 端买家登录应成功，实际 %d %+v", st, env.Error)
 	}

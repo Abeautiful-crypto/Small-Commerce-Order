@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"small-commerce-order/internal/cache"
@@ -223,6 +224,8 @@ func (s *Service) Shipments(actor model.Actor) ([]*model.Shipment, error) {
 	return st.Shipments, nil
 }
 
+// Ledger 资金流水：只返回与钱相关的记录。
+// 历史库里残留的「商品上架 / 商品下架」在读取时过滤，保证对账口径不被商品动作污染。
 func (s *Service) Ledger(actor model.Actor) ([]*model.LedgerEntry, error) {
 	if err := requireRole(actor, model.RoleOps); err != nil {
 		return nil, err
@@ -231,7 +234,33 @@ func (s *Service) Ledger(actor model.Actor) ([]*model.LedgerEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return st.Ledger, nil
+	out := make([]*model.LedgerEntry, 0, len(st.Ledger))
+	for _, l := range st.Ledger {
+		if isProductOpLedger(l.Type) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
+// isProductOpLedger 判断是否为历史遗留的商品动作流水（只用于读取过滤，不再写入）。
+func isProductOpLedger(typ string) bool {
+	return strings.HasPrefix(typ, "商品")
+}
+
+// ProductOps 商品操作记录（新增 / 上架 / 下架），仅运营可见。
+func (s *Service) ProductOps(actor model.Actor) ([]*model.ProductOp, error) {
+	if err := requireRole(actor, model.RoleOps); err != nil {
+		return nil, err
+	}
+	st, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*model.ProductOp, len(st.ProductOps))
+	copy(out, st.ProductOps)
+	return out, nil
 }
 
 func (s *Service) NotifyResults(actor model.Actor) ([]*model.NotifyResult, error) {
@@ -246,12 +275,15 @@ func (s *Service) NotifyResults(actor model.Actor) ([]*model.NotifyResult, error
 }
 
 // Summary 运营对账汇总（R8）。
+// ReceivedFen 是渠道确认到账的总额（含后续被退掉的部分）；
+// NetFen = 收款 − 退款，即「实收金额」，概览页展示的是它。
 type Summary struct {
 	ReceivedFen  int64 `json:"receivedFen"`
 	RefundedFen  int64 `json:"refundedFen"`
 	NetFen       int64 `json:"netFen"`
 	OrderCount   int   `json:"orderCount"`
 	ShippedCount int   `json:"shippedCount"`
+	SignedCount  int   `json:"signedCount"`
 	AbnormalCnt  int   `json:"abnormalCount"`
 	LedgerCount  int   `json:"ledgerCount"`
 }
@@ -266,12 +298,18 @@ func (s *Service) Summary(actor model.Actor) (*Summary, error) {
 	}
 	out := &Summary{OrderCount: len(st.Orders), LedgerCount: len(st.Ledger)}
 	for _, o := range st.Orders {
-		if o.Status == model.StatusShipped {
+		switch o.Status {
+		case model.StatusShipped:
 			out.ShippedCount++
+		case model.StatusSigned:
+			out.SignedCount++
 		}
 	}
 	out.AbnormalCnt = len(st.AbnormalPayments)
 	for _, l := range st.Ledger {
+		if isProductOpLedger(l.Type) {
+			continue
+		}
 		switch l.Type {
 		case "收款":
 			out.ReceivedFen += l.AmountFen
