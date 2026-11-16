@@ -18,8 +18,27 @@ go run .
 浏览器打开 **C 端买家页** <http://localhost:8090>，**B 端工作台** <http://localhost:8091>。
 两端是独立页面、独立端口、独立登录入口：C 端只接受买家账号，B 端只接受运营/仓库/客服账号，
 登录接口会按角色所属端硬校验（用仓库管理员账号在 C 端登录会被拒绝，反之亦然）。
-首次预置 2 个商品（单价 10000 分）、3 名买家、运营/仓库/客服各 1 名、
-1 条待发货订单与 1 条收款流水。
+
+### 登录与账号
+
+登录页只有「**手机号 + 密码**」两个输入框，**没有演示账号下拉、没有角色选择**：
+账号必须是 11 位数字手机号（`internal/account.IsPhone`，前后端同时校验），
+角色完全由服务端账号表给出，登录后只能进入该角色对应的页面（运营=概览/商品/订单核查/资金流水，
+仓库=发货管理/发货记录，客服=退款审核/异常支付/处理记录），页面上也不提供任何切换身份的入口。
+
+账号存放在数据库两张表（首次启动自动建表，并幂等补齐 `phone` 列与手机号种子，初始密码 `123456`）：
+
+| 表 | 用途 | 初始手机号 |
+|---|---|---|
+| `users` | C 端买家 | `13800000001` 张小买 / `13800000002` 李小购 / `13800000003` 王小单 |
+| `staff` | B 端管理人员（`role` 决定落地页） | `13900000001` 运营专员 / `13900000002` 仓库管理员 / `13900000003` 客服小花 |
+
+密码以 **PBKDF2-HMAC-SHA256（10 万次迭代 + 随机盐）** 存储在 `password_hash` / `salt` 两列，
+库里没有明文。改密码直接更新这两列即可（插入语句见 `internal/account` 的 `HashPassword`）。
+
+演示商品共 12 件，覆盖 家用电器 / 电子产品 / 儿童玩具 / 书本 / 食品 / 家居生活 六个分类
+（C 端首页按分类筛选，B 端商品管理可按名称、编号、分类搜索）；商品图片由运营在「新建商品」里
+**从本机选择并上传**（`POST /api/uploads`，仅运营，限 JPG/PNG/WEBP/GIF、5MB，落盘 `web/uploads/`）。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -235,13 +254,19 @@ scripts/acceptance_check.py    一键 HTTP 验收脚本（五大场景 + 四类�
 
 ## 主要接口
 
-商品：`GET /api/products`、`POST /api/products/{id}/onsale`
-订单：`GET /api/orders`、`GET /api/orders/{id}`、`POST /api/orders`、`POST /api/orders/{id}/cancel|expire|pay-intent|refund-apply|ship`
-会话：`POST /api/session`（Redis `sess:{token}`）
+商品：`GET /api/products`、`POST /api/products`、`POST /api/products/{id}/onsale`、`POST /api/uploads`
+商品记录：`GET /api/product-ops`（新增 / 上下架，与资金流水分开）
+评价：`GET|POST /api/products/{id}/reviews`（父子两级，仅已签收订单可发）
+订单：`GET /api/orders`、`GET /api/orders/{id}`、`POST /api/orders`、`POST /api/orders/{id}/cancel|expire|pay-intent|refund-apply|ship|sign`
+账号：`POST /api/session`（Redis `sess:{token}`）、`POST /api/register`（C 端手机号自助注册）
+客服会话：`GET /api/chat/threads`（客服）、`GET|POST /api/chat/{orderId}`（买家本人 / 客服）
 支付：`POST /api/payments/notify`
 退款：`GET /api/refunds`、`POST /api/refunds/{id}/review|retry|channel-notify`
 异常：`GET /api/abnormal`、`POST /api/abnormal/{id}/handle`
 核查：`GET /api/summary|ledger|notify-results|state|shipments`、`POST /api/reset`
+
+订单状态：待付款 → 待发货 →（发货）已发货 →（买家确认收货）已签收；待发货 → 退款中 → 已退款。
+「已签收」与「已退款」是终态。概览页的「实收金额」= 收款 − 退款，资金流水不含商品上下架动作。
 
 身份：demo 模式优先取 `X-Token`（Redis 会话），可回退 `X-Role` / `X-User-Id`；
 production 模式**只认** `X-Token`，且 `POST /api/session` 必须带密码。名字始终由服务端账号表还原。

@@ -23,3 +23,7 @@
 __pycache__/
 *.pyc
 *.tmp
+
+# 运营上传的商品图片（运行时数据，不提交）
+/web/uploads/
+
