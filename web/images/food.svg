@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400" role="img" aria-label="食品">
+  <defs>
+    <linearGradient id="bg5" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6f7ec"/><stop offset="1" stop-color="#e4ead2"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#bg5)"/>
+  <circle cx="200" cy="205" r="118" fill="#ffffff" opacity="0.6"/>
+  <!-- 礼盒 -->
+  <rect x="112" y="204" width="176" height="104" rx="14" fill="#e9875c"/>
+  <rect x="112" y="204" width="176" height="26" rx="13" fill="#f2a883"/>
+  <rect x="186" y="204" width="28" height="104" fill="#f6d7b8"/>
+  <path d="M200 204c-26-32-64-26-64-6 0 16 34 14 64 6z" fill="#f6d7b8"/>
+  <path d="M200 204c26-32 64-26 64-6 0 16-34 14-64 6z" fill="#f6d7b8"/>
+  <!-- 茶杯 -->
+  <rect x="268" y="252" width="58" height="52" rx="12" fill="#fdfbf5" stroke="#d9cbb0" stroke-width="3"/>
+  <path d="M326 264h12a14 14 0 0 1 0 28h-12" stroke="#d9cbb0" stroke-width="5" fill="none"/>
+  <path d="M286 240c-6-10 4-14 0-24M300 240c-6-10 4-14 0-24" stroke="#bcd3c1" stroke-width="5" stroke-linecap="round" fill="none"/>
+  <ellipse cx="200" cy="318" rx="104" ry="14" fill="#d8dfc4" opacity="0.8"/>
+</svg>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400" role="img" aria-label="家居生活">
+  <defs>
+    <linearGradient id="bg6" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f3f1f8"/><stop offset="1" stop-color="#dedbee"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#f6d79a" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#f6d79a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#bg6)"/>
+  <circle cx="200" cy="200" r="118" fill="#ffffff" opacity="0.55"/>
+  <!-- 落地灯 -->
+  <circle cx="200" cy="150" r="88" fill="url(#glow)"/>
+  <path d="M150 148h100l-22-56h-56z" fill="#f0c98b"/>
+  <path d="M150 148h100l-6 12H156z" fill="#e0b274"/>
+  <rect x="194" y="160" width="12" height="130" rx="6" fill="#7b8a99"/>
+  <ellipse cx="200" cy="296" rx="62" ry="12" fill="#7b8a99"/>
+  <rect x="268" y="226" width="60" height="70" rx="10" fill="#8b9fb4"/>
+  <rect x="276" y="206" width="44" height="22" rx="8" fill="#a9bccd"/>
+  <ellipse cx="120" cy="296" rx="30" ry="8" fill="#c9c4de"/>
+  <ellipse cx="200" cy="318" rx="110" ry="14" fill="#cdc8e2" opacity="0.7"/>
+</svg>

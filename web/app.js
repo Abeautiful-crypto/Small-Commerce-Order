@@ -26,6 +26,7 @@ const STATUS = {
   PENDING_SHIP: { label: '待发货' },
   REFUNDING: { label: '退款审核中' },
   SHIPPED: { label: '已发货' },
+  SIGNED: { label: '已签收' },
   CLOSED: { label: '已关闭' },
   REFUNDED: { label: '已退款' },
   ABNORMAL_PAY: { label: '异常支付' },
@@ -38,12 +39,8 @@ const REFUND_STATUS = {
   REJECTED: { label: '已拒绝' },
 };
 const ABNORMAL_STATUS = { PENDING: '待处理', HANDLED: '已退款' };
-const STATUS_ORDER = ['PENDING_PAY', 'PENDING_SHIP', 'REFUNDING', 'SHIPPED', 'CLOSED', 'REFUNDED', 'ABNORMAL_PAY'];
-const FALLBACK_USERS = [
-  { id: 'u001', name: '张小买', role: 'buyer' }, { id: 'u002', name: '李小购', role: 'buyer' },
-  { id: 'u003', name: '王小单', role: 'buyer' }, { id: 'admin', name: '运营专员', role: 'ops' },
-  { id: 'wh', name: '仓库管理员', role: 'warehouse' }, { id: 'cs', name: '客服小花', role: 'cs' },
-];
+const STATUS_ORDER = ['PENDING_PAY', 'PENDING_SHIP', 'REFUNDING', 'SHIPPED', 'SIGNED', 'CLOSED', 'REFUNDED', 'ABNORMAL_PAY'];
+
 const PERMISSIONS = {
   ops: ['商品上下架', '库存查看', '交易汇总', '全链路对账'],
   warehouse: ['待发货查看', '登记发货'],
@@ -55,7 +52,6 @@ let current = null;      // { role, id, name, token }
 let meta = null;
 let buyerTab = 'shop';
 let bizPage = '概览';
-let showRoleMenu = false;
 let orderFilter = 'all';
 let auditFilter = '全部';
 let filterOpen = false;
@@ -63,17 +59,20 @@ let shopQuery = '';
 let productQuery = '';
 let busy = false;
 let cdReloaded = false;
-let db = { products: [], orders: [], refunds: [], abnormal: [], ledger: [], shipments: [], payments: [], notifyResults: [], summary: null };
+let db = {
+  products: [], orders: [], refunds: [], abnormal: [], ledger: [], shipments: [],
+  payments: [], notifyResults: [], summary: null,
+  productOps: [],   // 商品操作记录（新增 / 上架 / 下架），与资金流水分开
+  threads: [],      // 客服会话列表
+  addresses: [],    // 买家收货地址（仅买家加载）
+};
 
 const $ = (s) => document.querySelector(s);
 const formatYuan = (f) => (Number(f || 0) / 100).toFixed(2);
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const stOf = (s) => STATUS[s] || { label: s || '-' };
-function usersOf(role) {
-  const list = (meta && meta.users) || FALLBACK_USERS;
-  return list.filter((u) => u.role === role);
-}
+
 function fmtTime(t) {
   if (!t) return '-';
   const d = new Date(t);
@@ -155,7 +154,20 @@ function openModal(html) {
   m.addEventListener('mousedown', (e) => { if (e.target === m) closeModal(); });
   document.body.appendChild(m);
 }
-function closeModal() { document.querySelectorAll('.modal-backdrop').forEach((m) => m.remove()); }
+function closeModal() {
+  const hadChat = !!chatOrder;
+  document.querySelectorAll('.modal-backdrop').forEach((m) => m.remove());
+  // 会话弹窗关闭后必须停掉 4 秒一次的轮询
+  if (typeof stopChatPoll === 'function') stopChatPoll();
+  // 聊完回到页面时刷新一次：客服侧未读徽标、买家侧「客服有新回复」提示都要立刻同步
+  if (hadChat && current) {
+    refresh().then(() => {
+      if (document.querySelector('.modal-backdrop')) return;
+      if (current.role === 'cs' && bizPage !== '客服消息') return;
+      render();
+    }).catch(() => {});
+  }
+}
 function modalFrame(title, ico, body) {
   return `<div class="detail-modal">
     <button class="modal-close" onclick="closeModal()" aria-label="关闭">${icon('close')}</button>
@@ -174,6 +186,9 @@ function confirmAction(title, note, confirmLabel, js) {
 const ROUTE_GUARD = [
   { re: /^\/api\/orders$/, roles: ['buyer'], action: '下单/支付' },
   { re: /^\/api\/orders\/[^/]+\/(cancel|expire|pay-intent|refund-apply)$/, roles: ['buyer'], action: '下单/支付/取消/申请退款' },
+  { re: /^\/api\/addresses(\/[^/]+(\/default)?)?$/, roles: ['buyer'], action: '收货地址管理' },
+  { re: /^\/api\/orders\/[^/]+\/sign$/, roles: ['buyer'], action: '确认收货' },
+  { re: /^\/api\/products\/[^/]+\/reviews$/, roles: ['buyer'], action: '商品评价' },
   { re: /^\/api\/orders\/[^/]+\/ship$/, roles: ['warehouse'], action: '登记发货' },
   { re: /^\/api\/products$/, roles: ['ops'], action: '商品管理' },
   { re: /^\/api\/products\/[^/]+\/onsale$/, roles: ['ops'], action: '商品上下架' },
@@ -203,14 +218,17 @@ async function api(path, opts) {
       throw err;
     }
   }
-  const headers = { 'Content-Type': 'application/json', 'X-Client': SIDE };
+  // 文件上传统一走 FormData：此时不能手写 Content-Type，交给浏览器带 boundary
+  const isForm = typeof FormData !== 'undefined' && o.body instanceof FormData;
+  const headers = { 'X-Client': SIDE };
+  if (!isForm) headers['Content-Type'] = 'application/json';
   if (current) {
     headers['X-Role'] = current.role; headers['X-User-Id'] = current.id;
     if (current.token) headers['X-Token'] = current.token;
   }
   const res = await fetch(path, {
     method: o.method || 'GET', headers,
-    body: o.body === undefined ? undefined : JSON.stringify(o.body),
+    body: o.body === undefined ? undefined : (isForm ? o.body : JSON.stringify(o.body)),
   });
   let json;
   try { json = await res.json(); } catch (e) { json = { ok: false, error: { message: '服务端返回异常' } }; }
@@ -240,39 +258,73 @@ async function act(fn, okMsg) {
 async function refresh() {
   if (!current) return;
   if (current.role === 'buyer') {
-    const [products, orders] = await Promise.all([api('/api/products'), api('/api/orders')]);
-    db.products = products || []; db.orders = orders || [];
+    // 买家也拉会话摘要：用于订单卡上的「客服已回复」提示与轮询弹提醒
+    const [products, orders, threads, addrs] = await Promise.all([
+      api('/api/products'), api('/api/orders'), api('/api/chat/threads'), api('/api/addresses'),
+    ]);
+    db.products = products || []; db.orders = orders || []; db.threads = threads || [];
+    db.addresses = addrs || [];
   } else if (current.role === 'ops') {
     const [st, summary] = await Promise.all([api('/api/state'), api('/api/summary')]);
     db.products = st.products || []; db.orders = st.orders || []; db.ledger = st.ledger || [];
     db.notifyResults = st.notifyResults || []; db.refunds = st.refunds || [];
     db.abnormal = st.abnormalPayments || []; db.shipments = st.shipments || [];
     db.payments = st.payments || []; db.summary = summary;
+    db.productOps = st.productOps || [];
   } else if (current.role === 'warehouse') {
     const [orders, shipments] = await Promise.all([api('/api/orders'), api('/api/shipments')]);
     db.orders = orders || []; db.shipments = shipments || [];
   } else if (current.role === 'cs') {
-    const [refunds, abnormal, orders] = await Promise.all([api('/api/refunds'), api('/api/abnormal'), api('/api/orders')]);
+    const [refunds, abnormal, orders, threads] = await Promise.all([
+      api('/api/refunds'), api('/api/abnormal'), api('/api/orders'), api('/api/chat/threads'),
+    ]);
     db.refunds = refunds || []; db.abnormal = abnormal || []; db.orders = orders || [];
+    db.threads = threads || [];
   }
 }
 
+/* ================= 实时刷新（跨端状态同步） ================= */
+// 仓库登记发货、买家签收、客服退款后，另一端不需要重新登录即可看到最新状态：
+// 每 8 秒静默轮询一次，数据有变化才重绘；弹窗打开、正在输入、操作进行中时跳过，避免打断操作。
+let pollTimer = null;
+let lastSnap = '';
+function dbSnapshot() {
+  return JSON.stringify({
+    o: db.orders, p: db.products, r: db.refunds, a: db.abnormal,
+    s: db.shipments, l: db.ledger, t: db.threads, po: db.productOps,
+  });
+}
+function pollingPaused() {
+  if (!current || busy) return true;
+  if (document.querySelector('.modal-backdrop')) return true;
+  const ae = document.activeElement;
+  return !!(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName));
+}
+async function pollOnce() {
+  if (pollingPaused()) return;
+  try {
+    await refresh();
+    if (current.role === 'buyer') syncBuyerChatNotice(false);
+    const snap = dbSnapshot();
+    if (snap !== lastSnap) { lastSnap = snap; render(); }
+  } catch (e) { /* 轮询失败不打断用户，下一轮再试 */ }
+}
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(pollOnce, 8000);
+}
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+// 切回标签页 / 窗口获得焦点时立即刷新一次，比等 8 秒更快
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollOnce(); });
+window.addEventListener('focus', () => { pollOnce(); });
+
 /* ================= 登录 ================= */
+// 登录页只提供「账号 + 密码」两个输入框：角色由服务端账号表判定，
+// 前端既不能选角色，也拿不到任何账号清单。
 function renderLogin() {
-  let selRole = SIDE_ROLES[0];
-  const pwdless = !!(meta && meta.loginPasswordless);
-  const pwdField = pwdless ? '' : `
-    <div class="login-field"><label>登录密码</label>
-      <input id="pwdInput" type="password" autocomplete="current-password"
-        placeholder="${(meta && meta.env === 'production') ? '生产模式：请输入账号密码' : '演示模式可留空'}"/></div>`;
-  const modeNote = pwdless
-    ? '<b>免密码登录</b>：选择角色与账号即可进入，登录态仍绑定服务端会话令牌。'
-    : ((meta && meta.env === 'production')
-      ? '<b>生产模式</b>：密码由服务端环境变量配置，登录态仅认会话令牌。'
-      : '演示模式：选角色即登录，密码可留空。');
   const hint = SIDE === 'c'
-    ? `当前是 <b>C 端买家页面</b>（独立端口）。此处只接受买家账号，运营 / 仓库 / 客服请打开 <b>B 端工作台</b> 页面登录；用工作台账号在这里登录会被服务端拒绝。`
-    : `当前是 <b>B 端工作台</b>（独立端口）。此处只接受运营 / 仓库 / 客服账号，买家请打开 <b>C 端买家页面</b> 登录；用买家账号在这里登录会被服务端拒绝。`;
+    ? `当前是 <b>C 端买家页面</b>（独立端口），仅接受买家账号。运营 / 仓库 / 客服请打开 <b>B 端工作台</b> 页面登录。`
+    : `当前是 <b>B 端工作台</b>（独立端口），仅接受运营 / 仓库 / 客服账号。买家请打开 <b>C 端买家页面</b> 登录。`;
   $('#app').innerHTML = `
   <div class="login-page"><div class="login-card">
     <div class="login-brand">
@@ -280,76 +332,102 @@ function renderLogin() {
       <div><h1>衡序交易</h1><small>小型电商订单交易系统 · ${SIDE_LABEL}</small></div>
     </div>
     <div class="login-hint">${hint}</div>
-    <div class="role-grid side-${SIDE}" id="roleGrid"></div>
-    <div class="login-field"><label>选择演示账号</label><select id="userSel"></select></div>
-    ${pwdField}
-    <button class="enter-btn" onclick="doLogin()">进 入 系 统</button>
-    <div class="login-subtle">${modeNote} 金额单位统一为「分」。</div>
+    <form class="login-form" onsubmit="doLogin();return false">
+      <div class="login-field"><label for="accountInput">手机号</label>
+        <input id="accountInput" type="tel" inputmode="numeric" maxlength="11" autocomplete="username"
+          autocapitalize="off" spellcheck="false" placeholder="请输入 11 位手机号" autofocus/></div>
+      <div class="login-field"><label for="pwdInput">登录密码</label>
+        <input id="pwdInput" type="password" autocomplete="current-password" placeholder="请输入登录密码"/></div>
+      <button class="enter-btn" type="submit" id="loginBtn">登 录</button>
+    </form>
+    ${SIDE === 'c' ? `<div class="login-register">还没有账号？<button type="button" onclick="openRegister()">注册新账号</button></div>` : ''}
+    <div class="login-subtle">手机号为登录账号，账号与密码由服务端账号表校验，登录后只能进入该角色对应的页面。金额单位统一为「分」。</div>
   </div></div>`;
-  const rg = $('#roleGrid');
-  SIDE_ROLES.forEach((k) => {
-    const v = ROLES[k];
-    const d = document.createElement('div');
-    d.className = 'role-card' + (k === selRole ? ' sel' : '');
-    d.innerHTML = `<div class="ico">${v.ico}</div><div class="nm">${v.label}</div><div class="ds">${v.desc}</div>`;
-    d.onclick = () => {
-      selRole = k;
-      document.querySelectorAll('.role-card').forEach((x) => x.classList.remove('sel'));
-      d.classList.add('sel');
-      fillUsers(k);
-    };
-    rg.appendChild(d);
-  });
-  window._selRole = selRole;
-  fillUsers(selRole);
 }
-function fillUsers(role) {
-  window._selRole = role;
-  const s = $('#userSel');
-  s.innerHTML = '';
-  usersOf(role).forEach((u) => {
-    const o = document.createElement('option');
-    o.value = u.id;
-    o.textContent = `${u.name}(${u.id})`;
-    s.appendChild(o);
-  });
+// 注册：手机号 + 密码 + 昵称，注册成功自动回填手机号，用户直接登录即可
+function openRegister() {
+  openModal(modalFrame('注册买家账号', 'user', `
+    <p class="form-note" style="margin-top:16px">手机号即登录账号（11 位数字），密码 6–32 位；注册后可直接用手机号登录 C 端。运营 / 仓库 / 客服账号由系统预置，不开放注册。</p>
+    <div class="form-grid">
+      <label>手机号<input id="regPhone" type="tel" inputmode="numeric" maxlength="11" placeholder="请输入 11 位手机号"/></label>
+      <label>昵称<input id="regName" placeholder="不填自动生成" maxlength="20"/></label>
+      <label>密码<input id="regPwd" type="password" placeholder="6–32 位"/></label>
+      <label>确认密码<input id="regPwd2" type="password" placeholder="再输入一次"/></label>
+    </div>
+    <div class="form-note" id="regNote" style="margin-bottom:14px"></div>
+    <button class="primary wide" id="regBtn" onclick="submitRegister()">注册并返回登录</button>`));
 }
-async function loginAs(role, userId, password) {
-  if (!SIDE_ROLES.includes(role)) {
-    throw new Error(`当前页面是 ${SIDE_LABEL}，不接受 ${ROLES[role] ? ROLES[role].label : role} 账号`);
-  }
-  let token = '';
+async function submitRegister() {
+  const phone = (($('#regPhone') && $('#regPhone').value) || '').trim();
+  const name = (($('#regName') && $('#regName').value) || '').trim();
+  const pwd = ($('#regPwd') && $('#regPwd').value) || '';
+  const pwd2 = ($('#regPwd2') && $('#regPwd2').value) || '';
+  const note = $('#regNote');
+  const fail = (msg) => { if (note) { note.textContent = '⚠ ' + msg; note.style.color = '#b4554e'; } toast(msg); };
+  if (!/^\d{11}$/.test(phone)) { fail('手机号必须是 11 位数字'); return; }
+  if (pwd.length < 6) { fail('密码至少 6 位'); return; }
+  if (pwd !== pwd2) { fail('两次输入的密码不一致'); return; }
+  const btn = $('#regBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '注册中…'; }
   try {
-    // side 与页面端一致：后端会再校验一次角色所属端，双重保险
-    const sess = await api('/api/session', { method: 'POST', body: { role, userId, password, side: SIDE } });
-    if (sess && sess.sessionEnabled && sess.token) token = sess.token;
+    await api('/api/register', { method: 'POST', body: { phone, password: pwd, name }, skipGuard: true });
+    closeModal();
+    toast('注册成功，请用手机号登录');
+    const acc = $('#accountInput');
+    if (acc) { acc.value = phone; acc.focus(); }
+    const p = $('#pwdInput');
+    if (p) p.focus();
   } catch (e) {
-    if (meta && meta.env === 'production') throw e;
-    if (e.status === 403) throw e; // 端/角色不匹配必须直接失败，不能降级
-    // demo 模式下 Redis 不可用时降级为请求头身份
+    if (btn) { btn.disabled = false; btn.textContent = '注册并返回登录'; }
+    fail('注册失败：' + e.message);
   }
-  const u = usersOf(role).find((x) => x.id === userId);
-  current = { role, id: userId, name: u ? u.name : userId, token };
+}
+// 登录成功后 current 的唯一来源是服务端响应（role / id / name 均不可前端伪造）。
+async function loginAs(phone, password) {
+  const sess = await api('/api/session', { method: 'POST', body: { phone, password } });
+  const u = (sess && sess.user) || {};
+  if (!u.role || !u.id) throw new Error('登录响应异常，请重试');
+  if (!SIDE_ROLES.includes(u.role)) {
+    throw new Error(`${ROLES[u.role] ? ROLES[u.role].label : u.role} 账号不属于 ${SIDE_LABEL}`);
+  }
+  current = { role: u.role, id: u.id, name: u.name || u.id, phone: u.phone || phone, token: (sess && sess.token) || '' };
   db = { products: [], orders: [], refunds: [], abnormal: [], ledger: [], shipments: [], payments: [], notifyResults: [], summary: null };
   buyerTab = 'shop';
-  bizPage = role === 'ops' ? '概览' : role === 'warehouse' ? '发货管理' : role === 'cs' ? '退款审核' : '概览';
+  // 落地页严格按角色决定：运营→概览、仓库→发货管理、客服→退款审核
+  bizPage = u.role === 'ops' ? '概览' : u.role === 'warehouse' ? '发货管理' : '退款审核';
   orderFilter = 'all'; auditFilter = '全部'; filterOpen = false; shopQuery = ''; productQuery = ''; cdReloaded = false;
   await refresh();
+  lastSnap = dbSnapshot();
+  chatToastSeen = {};
+  syncBuyerChatNotice(true); // 登录时静默登记未读，只有之后的新回复才弹提醒
   render();
-  toast(`已以 ${ROLES[role].label}·${current.name} 身份登录${token ? '（Redis 会话）' : ''}`);
+  startPolling(); // 登录后开启跨端实时同步
+  toast(`已登录：${ROLES[u.role] ? ROLES[u.role].label : u.role} · ${current.name}`);
 }
 function doLogin() {
-  const id = $('#userSel').value;
-  const role = window._selRole;
-  const u = usersOf(role).find((x) => x.id === id);
-  if (!u) { toast('请选择有效账号'); return; }
-  const password = ($('#pwdInput') && $('#pwdInput').value) || '';
+  const id = (($('#accountInput') && $('#accountInput').value) || '').trim();
+  const pwd = ($('#pwdInput') && $('#pwdInput').value) || '';
+  if (!id) { toast('请输入手机号'); $('#accountInput').focus(); return; }
+  // 与服务端一致：登录账号必须是 11 位纯数字手机号
+  if (!/^\d{11}$/.test(id)) { toast('手机号必须是 11 位数字'); $('#accountInput').focus(); return; }
+  if (!pwd) { toast('请输入登录密码'); $('#pwdInput').focus(); return; }
+  const btn = $('#loginBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '登录中…'; }
   (async () => {
-    try { await loginAs(role, id, password); }
-    catch (e) { toast('登录失败：' + e.message, 3200); }
+    try {
+      await loginAs(id, pwd);
+    } catch (e) {
+      toast('登录失败：' + e.message, 3200);
+      if (btn) { btn.disabled = false; btn.textContent = '登 录'; }
+      const p = $('#pwdInput');
+      if (p) { p.value = ''; p.focus(); }
+    }
   })();
 }
-function doLogout() { current = null; closeModal(); renderLogin(); }
+function doLogout() {
+  stopHeroTimer(); stopPolling(); stopChatPoll();
+  current = null; lastSnap = ''; closeModal(); renderLogin();
+}
 
 /* ================= 主框架 ================= */
 function render() {
@@ -372,6 +450,8 @@ function render() {
     </header>
     ${SIDE === 'c' ? renderCustomer() : renderBusiness()}
   </div>`;
+  // 只在本端逛逛页启动轮播定时器，切走/退出时立刻停掉，避免后台空转
+  startHeroTimer();
 }
 
 /* ================= C 端：逛逛 ================= */
@@ -394,24 +474,77 @@ function renderCustomer() {
   </div></main>`;
 }
 function switchTab(t) { buyerTab = t; render(); }
-function renderShop() {
+// 首页轮播：4 张主图，4.5 秒自动切换，可点圆点或左右箭头手动切换。
+const HERO_SLIDES = [
+  { tag: '限时好物计划', title: '认真挑选，<br/>简单抵达。', desc: '每件商品都经过精选，安心交易有迹可循。', image: 'images/product1.png', note: '限量热卖' },
+  { tag: '新品家电专场', title: '把日常，<br/>交给好电器。', desc: '电饭煲 / 空气炸锅，厨房效率翻倍。', image: 'images/appliance.svg', note: '新品上架' },
+  { tag: '童趣时光', title: '陪孩子，<br/>玩出想象力。', desc: '益智积木与遥控玩具，材质安心。', image: 'images/toy.svg', note: '亲子精选' },
+  { tag: '静心阅读', title: '一本书，<br/>一段好时光。', desc: '儿童绘本与经典名著，读得进去的好书。', image: 'images/book.svg', note: '编辑推荐' },
+];
+const SHOP_CATEGORIES = ['家用电器', '电子产品', '儿童玩具', '书本', '食品', '家居生活', '其他'];
+let heroIdx = 0;
+let heroTimer = null;
+let shopCategory = '全部';
+
+function heroSlideHTML() {
+  const s = HERO_SLIDES[heroIdx % HERO_SLIDES.length];
+  return `<div class="hero-copy">
+      <span>${s.tag}</span>
+      <h1>${s.title}</h1>
+      <p>${s.desc}</p>
+      <button onclick="document.getElementById('products')?.scrollIntoView({behavior:'smooth'})">立即选购 ${icon('arrow', 17)}</button>
+    </div>
+    <div class="hero-visual"><img src="${esc(s.image)}" alt="${s.tag}"/><span class="floating-tag">${s.note}</span></div>`;
+}
+function heroDotsHTML() {
+  return HERO_SLIDES.map((s, i) => `<button class="hero-dot${i === heroIdx % HERO_SLIDES.length ? ' active' : ''}"
+    onclick="gotoHero(${i})" aria-label="第 ${i + 1} 张：${s.tag}"></button>`).join('');
+}
+function renderHero() {
+  const s = $('#heroSlides');
+  if (s) s.innerHTML = heroSlideHTML();
+  const d = $('#heroDots');
+  if (d) d.innerHTML = heroDotsHTML();
+}
+function gotoHero(i) {
+  heroIdx = (i + HERO_SLIDES.length) % HERO_SLIDES.length;
+  renderHero();
+  startHeroTimer(); // 手动切换后重新计时
+}
+function heroStep(d) { gotoHero(heroIdx + d); }
+function startHeroTimer() {
+  stopHeroTimer();
+  if (!current || SIDE !== 'c' || buyerTab !== 'shop' || !$('#heroSlides')) return;
+  heroTimer = setInterval(() => {
+    if (!$('#heroSlides')) { stopHeroTimer(); return; }
+    heroIdx = (heroIdx + 1) % HERO_SLIDES.length;
+    renderHero();
+  }, 4500);
+}
+function stopHeroTimer() {
+  if (heroTimer) { clearInterval(heroTimer); heroTimer = null; }
+}
+function filteredProducts() {
   const q = shopQuery.trim().toLowerCase();
-  const list = db.products.filter((p) => !q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
-  const hero = db.products[0] || { image: 'images/product1.png', available: 0 };
+  return db.products.filter((p) => {
+    if (shopCategory !== '全部' && p.category !== shopCategory) return false;
+    if (!q) return true;
+    return p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q);
+  });
+}
+function renderShop() {
+  const list = filteredProducts();
   return `
     <div class="search-box">${icon('search', 19)}
       <input id="shopSearch" value="${esc(shopQuery)}" placeholder="搜索好物" aria-label="搜索商品"
         oninput="shopQuery=this.value;renderShopGrid()"/>
       <kbd>搜索</kbd>
     </div>
-    <section class="customer-hero">
-      <div class="hero-copy">
-        <span>限时好物计划</span>
-        <h1>认真挑选，<br/>简单抵达。</h1>
-        <p>每件商品都经过精选，安心交易有迹可循。</p>
-        <button onclick="document.getElementById('products')?.scrollIntoView({behavior:'smooth'})">立即选购 ${icon('arrow', 17)}</button>
-      </div>
-      <div class="hero-visual"><img src="${esc(hero.image)}" alt="精选商品"/><span class="floating-tag">限量热卖</span></div>
+    <section class="customer-hero carousel">
+      <div class="hero-slides" id="heroSlides">${heroSlideHTML()}</div>
+      <button class="hero-arrow prev" onclick="heroStep(-1)" aria-label="上一张">${icon('chevron', 18)}</button>
+      <button class="hero-arrow next" onclick="heroStep(1)" aria-label="下一张">${icon('chevron', 18)}</button>
+      <div class="hero-dots" id="heroDots">${heroDotsHTML()}</div>
     </section>
     <section class="trust-strip">
       <div>${icon('shield')}<span><b>支付保障</b><small>渠道校验，重复不扣款</small></span></div>
@@ -421,22 +554,26 @@ function renderShop() {
     <section class="products-section" id="products">
       <div class="section-heading">
         <div><span class="eyebrow">CURATED FOR YOU</span><h2>本周精选</h2></div>
-        <button onclick="toast('已在售商品共 ' + (${db.products.length}) + ' 件')">查看全部 ${icon('chevron', 15)}</button>
+        <button onclick="pickCategory('全部')">查看全部 ${icon('chevron', 15)}</button>
+      </div>
+      <div class="category-row" id="categoryRow">
+        ${['全部', ...SHOP_CATEGORIES].map((c) => `<button class="chip${c === shopCategory ? ' active' : ''}"
+          onclick="pickCategory('${c}')">${c}</button>`).join('')}
       </div>
       <div class="product-grid" id="shopGrid">${shopCards(list)}</div>
     </section>`;
 }
 function shopCards(list) {
-  if (!list.length) return '<div class="empty-state">没有匹配的商品</div>';
+  if (!list.length) return '<div class="empty-state">该分类下暂无匹配的商品</div>';
   return list.map((p) => `
     <article class="product-card" key="${esc(p.id)}">
-      <button class="product-image" onclick="openBuySheet('${esc(p.id)}')" ${p.onSale && p.available > 0 ? '' : 'disabled'}>
+      <button class="product-image" onclick="openProductSheet('${esc(p.id)}')">
         <img src="${esc(p.image)}" alt="${esc(p.name)}"/>
-        <span>${p.onSale ? (p.available > 0 ? `仅剩 ${p.available} 件` : '暂时售罄') : '已下架'}</span>
+        <span>${!p.onSale ? '已下架' : (p.available > 0 ? `仅剩 ${p.available} 件` : '已售罄')}</span>
       </button>
       <div class="product-info">
-        <p class="product-code">${esc(p.id)}</p>
-        <h3>${esc(p.name)}</h3>
+        <p class="product-code">${esc(p.id)} · ${esc(p.category || '其他')}</p>
+        <h3 onclick="openProductSheet('${esc(p.id)}')">${esc(p.name)}</h3>
         <p>已售 ${p.sales} 件</p>
         <p class="old-price">¥${formatYuan(p.oldPriceFen)}</p>
         <div class="product-bottom">
@@ -446,33 +583,100 @@ function shopCards(list) {
       </div>
     </article>`).join('');
 }
+function pickCategory(c) {
+  shopCategory = c;
+  document.querySelectorAll('#categoryRow .chip').forEach((b) => b.classList.toggle('active', b.textContent === c));
+  renderShopGrid();
+}
 function renderShopGrid() {
-  const q = shopQuery.trim().toLowerCase();
-  const list = db.products.filter((p) => !q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
   const g = $('#shopGrid');
-  if (g) g.innerHTML = shopCards(list);
+  if (g) g.innerHTML = shopCards(filteredProducts());
+}
+/* ---------- 商品详情：图片 / 价格 / 评论区（无人评论时提示「暂无人评论」） ---------- */
+function openProductSheet(pid) {
+  const p = db.products.find((x) => x.id === pid);
+  if (!p) return;
+  const canBuy = p.onSale && p.available > 0;
+  openModal(`<div class="buy-sheet product-detail-sheet">
+    <button class="modal-close" onclick="closeModal()" aria-label="关闭">${icon('close')}</button>
+    <div class="sheet-product">
+      <img src="${esc(p.image)}" alt=""/>
+      <div><p>${esc(p.name)}</p><strong>¥${formatYuan(p.priceFen)}</strong>
+        <span>${esc(p.category || '其他')} · 已售 ${p.sales} 件 · ${canBuy ? `可售 ${p.available} 件` : productStatus(p)}</span></div>
+    </div>
+    <div class="detail-review-head"><b>商品评价</b><span id="pdReviewCount"></span></div>
+    <div class="pd-reviews" id="pdReviews"><div class="empty-state">加载中…</div></div>
+    <div class="sheet-total"><span>单价</span><strong>¥${formatYuan(p.priceFen)}</strong></div>
+    <button class="primary wide" onclick="${canBuy ? `openBuySheet('${esc(p.id)}')` : 'null'}" ${canBuy ? '' : 'disabled'}>${canBuy ? '选择购买' : productStatus(p)}</button>
+  </div>`);
+  loadProductReviews(pid);
+}
+async function loadProductReviews(pid) {
+  const box = $('#pdReviews');
+  if (!box) return;
+  let list = [];
+  try { list = (await api(`/api/products/${pid}/reviews`)) || []; } catch (e) { list = []; }
+  const tops = list.filter((r) => !r.parentId).slice().reverse();
+  const count = $('#pdReviewCount');
+  if (count) count.textContent = tops.length ? `${tops.length} 条` : '';
+  if (!tops.length) {
+    box.innerHTML = '<div class="empty-state pd-empty">暂无人评论</div>';
+    return;
+  }
+  box.innerHTML = tops.map((r) => `
+    <article class="pd-review">
+      <div class="pd-review-head"><b>${esc(r.buyerName)}</b><small>${fmtRelTime(r.createdAt)}</small></div>
+      <p>${esc(r.content)}</p>
+      ${list.filter((c) => c.parentId === r.id).map((c) => `
+        <div class="pd-review-reply"><b>${esc(c.buyerName)}</b><span>${esc(c.content)}</span></div>`).join('')}
+    </article>`).join('');
+}
+const CH_LABEL = { wechat: '微信支付', alipay: '支付宝支付' };
+function defaultAddress() {
+  const list = db.addresses || [];
+  return list.find((a) => a.isDefault) || list[0] || null;
 }
 function openBuySheet(pid) {
   const p = db.products.find((x) => x.id === pid);
   if (!p) return;
   if (!p.onSale) { toast('商品已下架'); return; }
   window._buyPid = pid;
-  window._buyQty = 1;
+  window._buyQty = window._buyQty || 1;
+  window._buyChannel = window._buyChannel || 'wechat';
+  if (!window._buyAddr || !(db.addresses || []).some((a) => a.id === window._buyAddr)) {
+    const d = defaultAddress();
+    window._buyAddr = d ? d.id : '';
+  }
+  const addrs = db.addresses || [];
+  const sel = addrs.find((a) => a.id === window._buyAddr) || null;
   openModal(`<div class="buy-sheet">
     <button class="modal-close" onclick="closeModal()" aria-label="关闭">${icon('close')}</button>
     <div class="sheet-product">
       <img src="${esc(p.image)}" alt=""/>
       <div><p>${esc(p.name)}</p><strong>¥${formatYuan(p.priceFen)}</strong><span>库存 ${p.available} 件 · 每单限购 2 件</span></div>
     </div>
+    <button type="button" class="addr-bar" onclick="openAddrPicker(true)">
+      ${sel ? `<span class="addr-bar-pin">${icon('order', 15)}</span>
+        <div class="addr-bar-main"><b>${esc(sel.name)} ${esc(sel.phone)}</b>${sel.isDefault ? '<em>默认</em>' : ''}
+          <p>${esc(sel.region)} ${esc(sel.detail)}</p></div>`
+      : `<span class="addr-bar-pin warn">${icon('order', 15)}</span>
+        <div class="addr-bar-main"><b class="warn">请选择收货地址</b><p>下单前需要填写收货地址</p></div>`}
+      <span class="addr-bar-arrow">›</span>
+    </button>
+    <div class="sheet-sec"><b>支付方式</b></div>
+    <div class="pay-options">
+      <button type="button" class="pay-opt ${window._buyChannel === 'wechat' ? 'sel' : ''}" onclick="pickPay('wechat')"><i class="pay-dot wechat"></i>微信支付</button>
+      <button type="button" class="pay-opt ${window._buyChannel === 'alipay' ? 'sel' : ''}" onclick="pickPay('alipay')"><i class="pay-dot alipay"></i>支付宝支付</button>
+    </div>
     <div class="quantity-row"><span>购买数量</span>
       <div class="stepper">
         <button onclick="chgQty(-1)" aria-label="减少">−</button>
-        <b id="qtyN">1</b>
+        <b id="qtyN">${window._buyQty}</b>
         <button onclick="chgQty(1)" aria-label="增加">＋</button>
       </div>
     </div>
     <div class="rule-box">${icon('shield', 18)}<div><b>交易保障</b><p>下单即占库存，10 分钟内未支付将自动关闭并释放库存。</p></div></div>
-    <div class="sheet-total"><span>应付</span><strong id="qtySum">¥${formatYuan(p.priceFen)}</strong></div>
+    <div class="sheet-total"><span>应付</span><strong id="qtySum">¥${formatYuan(p.priceFen * window._buyQty)}</strong></div>
     <button class="primary wide" onclick="submitOrder()">确认下单</button>
   </div>`);
 }
@@ -485,15 +689,93 @@ function chgQty(d) {
   $('#qtyN').textContent = n;
   $('#qtySum').textContent = '¥' + formatYuan(p.priceFen * n);
 }
+// 重绘下单面板（保留已选数量 / 地址 / 支付方式），选择项高亮由 openBuySheet 依据 window 状态输出
+function rerenderBuySheet() { if (window._buyPid) openBuySheet(window._buyPid); }
+function pickPay(ch) { window._buyChannel = ch; rerenderBuySheet(); }
+
+/* ---------- 收货地址页：列表（选择 / 设默认 / 复制 / 修改 / 删除） ---------- */
+function openAddrPicker(fromBuy) {
+  window._addrFromBuy = !!fromBuy;
+  renderAddrPicker();
+}
+function addrBack() {
+  if (window._addrFromBuy) rerenderBuySheet(); else { closeModal(); render(); }
+}
+function renderAddrPicker() {
+  const list = db.addresses || [];
+  const selId = window._buyAddr;
+  const fromBuy = !!window._addrFromBuy;
+  openModal(`<div class="addr-page">
+    <div class="addr-page-head">
+      <button class="addr-back" onclick="addrBack()" aria-label="返回">‹</button>
+      <b>${fromBuy ? '选择收货地址' : '收货地址'}</b>
+      <span class="addr-page-count">${list.length}/10</span>
+    </div>
+    <div class="addr-page-body">
+      ${list.length ? list.map((a) => `
+        <div class="addr-page-item ${a.id === selId ? 'sel' : ''}">
+          <div class="addr-page-top">
+            <div class="addr-page-main">
+              <p class="addr-page-line"><b>${esc(a.name)}，${esc(a.phone)}</b></p>
+              <p class="addr-page-text">${esc(a.region)} ${esc(a.detail)}</p>
+            </div>
+            ${fromBuy
+              ? (a.id === selId ? '<span class="addr-used">✓</span>' : `<button class="addr-use" onclick="useAddr('${esc(a.id)}')">使用</button>`)
+              : ''}
+          </div>
+          <div class="addr-page-ops">
+            <button class="addr-def ${a.isDefault ? 'on' : ''}" onclick="setDefaultAddr('${esc(a.id)}')">
+              <i>${a.isDefault ? '✓' : ''}</i>${a.isDefault ? '已设默认' : '默认'}</button>
+            <button class="text-button" onclick="copyAddr('${esc(a.id)}')">复制</button>
+            <button class="text-button" onclick="openAddressEditor('${esc(a.id)}')">修改</button>
+            <button class="text-button danger" onclick="confirmDelAddr('${esc(a.id)}')">${window._delPending === a.id ? '确认删除' : '删除'}</button>
+          </div>
+        </div>`).join('')
+      : '<div class="addr-page-empty">还没有收货地址<br/><span>点击下方按钮添加，最多保存 10 个</span></div>'}
+    </div>
+    <div class="addr-page-foot">
+      <button class="primary wide" onclick="openAddressEditor('')">＋ 新增收货地址</button>
+    </div>
+  </div>`);
+}
+function useAddr(id) {
+  window._buyAddr = id;
+  rerenderBuySheet();
+  toast('已选择该收货地址');
+}
+function copyAddr(id) {
+  const a = (db.addresses || []).find((x) => x.id === id);
+  if (!a) return;
+  const text = `${a.name} ${a.phone} ${a.region} ${a.detail}`;
+  const done = () => toast('地址已复制');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else fallbackCopy(text, done);
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败，请手动选择地址文本'); }
+  document.body.removeChild(ta);
+}
 function submitOrder() {
   const pid = window._buyPid;
   const qty = window._buyQty || 1;
+  const addressId = window._buyAddr;
+  if (!addressId) { toast('请先选择或新增收货地址'); openAddrPicker(true); return; }
   (async () => {
-    const o = await act(() => api('/api/orders', { method: 'POST', body: { productId: pid, qty } }));
+    const o = await act(() => api('/api/orders', {
+      method: 'POST',
+      body: { productId: pid, qty, channel: window._buyChannel || 'wechat', addressId },
+    }));
     if (o) {
       buyerTab = 'orders';
       render();
-      toast('下单成功，库存已为你保留 10 分钟');
+      toast(`下单成功（${CH_LABEL[o.channel] || o.channel}），库存已为你保留 10 分钟`);
     }
   })();
 }
@@ -507,7 +789,7 @@ function renderBuyerOrders() {
   ];
   const visible = orders.filter((o) => {
     if (orderFilter === 'all') return true;
-    if (orderFilter === 'done') return ['SHIPPED', 'CLOSED', 'REFUNDED'].includes(o.status);
+    if (orderFilter === 'done') return ['SHIPPED', 'SIGNED', 'CLOSED', 'REFUNDED'].includes(o.status);
     return o.status === orderFilter;
   });
   return `
@@ -523,6 +805,9 @@ function renderBuyerOrders() {
   </section>`;
 }
 function buyerOrderCard(o) {
+  // 客服在该订单会话里有新回复时，卡片上直接提示，点击进入会话查看
+  const th = (db.threads || []).find((x) => x.orderId === o.id);
+  const csReplied = !!(th && threadUnread(th));
   const exp = o.status === 'PENDING_PAY' ? new Date(o.expiresAt).getTime() : 0;
   const left = exp - Date.now();
   let countdown = '';
@@ -538,6 +823,9 @@ function buyerOrderCard(o) {
     acts.push(`<button class="secondary danger" onclick="applyRefund('${esc(o.id)}')">申请退款</button>`);
   } else if (o.status === 'SHIPPED') {
     acts.push(`<button class="secondary" onclick="openLogistics('${esc(o.id)}')">查看物流</button>`);
+    acts.push(`<button class="primary" onclick="signOrder('${esc(o.id)}')">确认收货</button>`);
+  } else if (o.status === 'SIGNED') {
+    acts.push(`<button class="secondary" onclick="openReviews('${esc(o.productId)}','${esc(o.id)}')">评价 / 查看评论</button>`);
   } else if (o.status === 'CLOSED') {
     acts.push(`<button class="secondary" onclick="latePay('${esc(o.id)}')">模拟迟到支付</button>`);
   }
@@ -550,26 +838,41 @@ function buyerOrderCard(o) {
       <strong>¥${formatYuan(o.amountFen)}</strong>
     </button>
     ${countdown}
+    ${o.receiverName ? `<div class="order-recv">${icon('order', 13)} ${esc(o.receiverName)} ${esc(maskPhone(o.receiverPhone))} · ${esc(o.receiverAddress)}<em>${esc(CH_LABEL[o.channel] || o.channel || '-')}</em></div>` : ''}
     <div class="order-actions">${acts.join('')}</div>
+    <div class="order-service"><button class="text-button ${csReplied ? 'notice' : ''}" onclick="openOrderChat('${esc(o.id)}')">${icon('headset', 15)} ${csReplied ? '客服有新回复 · 点击查看' : '联系客服'}</button></div>
   </article>`;
+}
+// 确认收货：已发货 → 已签收，签收时间同步回仓库发货记录
+function signOrder(id) {
+  confirmAction('确认收货', '确认已经收到商品？签收后订单进入「已签收」，不可再申请退款，但可以对商品发表评价。',
+    '确认已收到', `doSign('${id}')`);
+}
+function doSign(id) {
+  act(() => api(`/api/orders/${id}/sign`, { method: 'POST', body: {} }), '已确认收货，订单状态：已签收');
 }
 function openOrderDetail(id) {
   const o = db.orders.find((x) => x.id === id);
   if (!o) { toast('订单不存在'); return; }
   const payDone = o.status !== 'PENDING_PAY';
-  const shipDone = o.status === 'SHIPPED' || (!!o.shipmentId && (o.status === 'REFUNDED' || o.status === 'CLOSED'));
+  const shipDone = ['SHIPPED', 'SIGNED'].includes(o.status) || (!!o.shipmentId && (o.status === 'REFUNDED' || o.status === 'CLOSED'));
+  const signedDone = o.status === 'SIGNED';
   const row = (k, v) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`;
   openModal(modalFrame('订单详情', 'order', `
     <div class="timeline">
       <div class="done"><i>${icon('check', 14)}</i><div><b>订单已创建</b><span>${fmtRelTime(o.createdAt)} · 商品价格已快照</span></div></div>
       <div class="${payDone ? 'done' : ''}"><i>${payDone ? icon('check', 14) : ''}</i><div><b>支付校验</b><span>${payDone ? '金额与订单匹配，收款成功' : '等待付款'}</span></div></div>
       <div class="${shipDone ? 'done' : ''}"><i>${shipDone ? icon('check', 14) : ''}</i><div><b>仓库履约</b><span>${shipDone ? '已登记发货' : o.status === 'REFUNDING' ? '退款审核中，发货已冻结' : '等待合法状态后处理'}</span></div></div>
+      <div class="${signedDone ? 'done' : ''}"><i>${signedDone ? icon('check', 14) : ''}</i><div><b>买家签收</b><span>${signedDone ? '买家已确认收货，可评价商品' : '等待买家确认收货'}</span></div></div>
     </div>
     <div class="detail-rows">
       ${row('状态', badge(o.status))}
       ${row('商品', esc(o.productName))}
       ${row('单价快照', '¥' + formatYuan(o.priceFen))}
       ${row('数量 / 合计', o.qty + ' 件 / ¥' + formatYuan(o.amountFen))}
+      ${row('支付方式', esc(CH_LABEL[o.channel] || o.channel || '-'))}
+      ${o.receiverName ? row('收货人', `${esc(o.receiverName)} · ${esc(maskPhone(o.receiverPhone))}`) : ''}
+      ${o.receiverAddress ? row('收货地址（快照）', esc(o.receiverAddress)) : ''}
       ${row('付款截止', fmtTime(o.expiresAt))}
       ${row('渠道交易号', `<span class="mono">${esc(o.channelTxnId || '-')}</span>`)}
       ${row('退款单 / 发货记录', `<span class="mono">${esc(o.refundId || '-')} / ${esc(o.shipmentId || '-')}</span>`)}
@@ -600,9 +903,11 @@ function payOrder(id) {
     try {
       const intent = await api(`/api/orders/${id}/pay-intent`, { method: 'POST', body: {} });
       window._intent = intent;
+      const oo = orderFor(id);
       openModal(modalFrame('模拟支付渠道', 'wallet', `
         <div class="detail-rows" style="margin-top:16px">
           <div class="detail-row"><span class="k">订单金额</span><span class="v">¥${formatYuan(intent.amountFen)}</span></div>
+          <div class="detail-row"><span class="k">支付方式</span><span class="v">${esc((oo && CH_LABEL[oo.channel]) || '-')}</span></div>
           <div class="detail-row"><span class="k">渠道交易号</span><span class="v mono">${esc(intent.channelTxnId)}</span></div>
           <div class="detail-row"><span class="k">通知签名</span><span class="v mono">${esc(intent.signature.slice(0, 16))}…</span></div>
         </div>
@@ -660,11 +965,15 @@ function latePay(id) {
 /* ================= C 端：我的 ================= */
 function renderProfile() {
   const orders = db.orders;
+  const avatar = loadAvatar();
   return `
   <section class="mobile-content">
     <div class="profile-card">
-      <div class="avatar">${esc((current.name || '买')[0])}</div>
-      <div><h2>${esc(current.name)}</h2><p>买家账号 · ${esc(current.id)}</p></div>
+      <button class="avatar avatar-editable" type="button" onclick="pickAvatar()" title="点击更换头像">
+        ${avatar ? `<img src="${esc(avatar)}" alt="头像"/>` : esc((current.name || '买')[0])}
+        <span class="avatar-edit">${icon('user', 12)}</span>
+      </button>
+      <div><h2>${esc(current.name)}</h2><p>买家账号 · ${esc(current.phone || current.id)}</p></div>
       <span class="verified">${icon('shield', 16)} 已实名</span>
     </div>
     <div class="profile-stats">
@@ -672,56 +981,175 @@ function renderProfile() {
       <div><b>${orders.filter((o) => o.status === 'PENDING_PAY').length}</b><span>待付款</span></div>
       <div><b>${orders.filter((o) => o.status === 'PENDING_SHIP').length}</b><span>待发货</span></div>
     </div>
-    <div class="permission-card">
-      <div class="permission-title">${icon('lock')}<div><h3>你的权限边界</h3><p>系统会在每次请求时校验身份与订单归属</p></div></div>
-      <ul>
-        <li>${icon('check', 16)} 浏览在售商品并创建订单</li>
-        <li>${icon('check', 16)} 支付、取消自己的待付款订单</li>
-        <li>${icon('check', 16)} 为自己的未发货订单申请退款</li>
-        <li class="disabled">${icon('close', 16)} 查看或操作其他买家的订单</li>
-        <li class="disabled">${icon('close', 16)} 商品管理、审核退款或登记发货</li>
-      </ul>
-      ${renderGuardDemo(['商品上下架', '登记发货', '审核退款', '处理异常支付'])}
+    <div class="addr-card">
+      ${(() => {
+        const d = defaultAddress(); const n = (db.addresses || []).length;
+        return `<button class="addr-card-entry" type="button" onclick="openAddrPicker(false)">
+          <span class="addr-bar-pin">${icon('order', 15)}</span>
+          <div class="addr-bar-main">
+            ${d ? `<b>${esc(d.name)} ${esc(d.phone)}</b>${d.isDefault ? '<em>默认</em>' : ''}<p>${esc(d.region)} ${esc(d.detail)}</p>`
+                : '<b class="warn">还没有收货地址</b><p>添加后下单可直接选用</p>'}
+            ${n > 1 ? `<span class="addr-card-more">共 ${n} 个地址</span>` : ''}
+          </div>
+          <span class="addr-bar-arrow">›</span>
+        </button>`;
+      })()}
     </div>
+    <button class="logout-wide" onclick="confirmLogout()">${icon('logout', 18)} 退出登录</button>
   </section>`;
 }
-function renderGuardDemo(actions) {
-  const btns = actions.map((a) => `<button onclick="tryForbidden('${a}')">尝试「${a}」</button>`).join('');
-  return `<div class="guard-demo"><h4>🔒 越权演示（当前：${esc(ROLES[current.role].label)}）</h4>
-    <p>点击按钮将以当前身份<b>真实调用</b>其他角色的后端接口，请求会被权限守卫拦截并返回 403，系统不做任何数据改动。</p>
-    <div class="forbidden">${btns}</div></div>`;
+/* ---------- 收货地址管理（我的页） ---------- */
+function maskPhone(p) { return p && p.length === 11 ? p.slice(0, 3) + '****' + p.slice(7) : (p || ''); }
+// 新增 / 修改地址表单（保存后回到地址列表页，保持「选择地址 → 下单」的连贯流程）
+function openAddressEditor(id) {
+  const a = id ? (db.addresses || []).find((x) => x.id === id) : null;
+  window._editAddrId = a ? a.id : '';
+  openModal(`<div class="addr-page">
+    <div class="addr-page-head">
+      <button class="addr-back" onclick="renderAddrPicker()" aria-label="返回">‹</button>
+      <b>${a ? '修改收货地址' : '新增收货地址'}</b>
+      <span class="addr-page-count"></span>
+    </div>
+    <div class="addr-page-body">
+      <div class="addr-form-page">
+        <label>收货人<input id="naName" maxlength="20" placeholder="收货人姓名" value="${a ? esc(a.name) : ''}"/></label>
+        <label>手机号<input id="naPhone" maxlength="11" inputmode="numeric" placeholder="11 位手机号" value="${a ? esc(a.phone) : ''}"/></label>
+        <label>所在地区<input id="naRegion" maxlength="60" placeholder="省 / 市 / 区" value="${a ? esc(a.region) : ''}"/></label>
+        <label>详细地址<input id="naDetail" maxlength="100" placeholder="街道、门牌号" value="${a ? esc(a.detail) : ''}"/></label>
+        <label class="addr-default"><input type="checkbox" id="naDefault" ${!a || a.isDefault ? 'checked' : ''}/> 设为默认地址</label>
+        <p class="addr-form-tip">最多保存 10 个地址；订单会记录下单时的地址快照，之后修改不影响历史订单。</p>
+      </div>
+    </div>
+    <div class="addr-page-foot"><button class="primary wide" onclick="saveAddress()">保存</button></div>
+  </div>`);
 }
-const FORBIDDEN_CALLS = {
-  '商品上下架': () => api('/api/products/P1/onsale', { method: 'POST', body: { onSale: false }, skipGuard: true }),
-  '登记发货': () => api('/api/orders/NO20260001/ship', { method: 'POST', body: {}, skipGuard: true }),
-  '审核退款': () => api('/api/refunds/RF-DEMO/review', { method: 'POST', body: { approve: true, note: '越权演示' }, skipGuard: true }),
-  '处理异常支付': () => api('/api/abnormal/ABN-DEMO/handle', { method: 'POST', body: {}, skipGuard: true }),
-  '下单/支付': () => api('/api/orders', { method: 'POST', body: { productId: 'P1', qty: 1 }, skipGuard: true }),
-  '新建商品': () => api('/api/products', { method: 'POST', body: { name: '越权商品', priceFen: 100, stock: 1 }, skipGuard: true }),
-};
-async function tryForbidden(action) {
-  let status = 0, msg = '';
-  try { await FORBIDDEN_CALLS[action](); msg = '请求未被拦截（异常情况，请检查权限守卫）'; }
-  catch (e) { status = e.status; msg = e.message; }
+async function saveAddress() {
+  const body = {
+    name: (($('#naName') && $('#naName').value) || '').trim(),
+    phone: (($('#naPhone') && $('#naPhone').value) || '').trim(),
+    region: (($('#naRegion') && $('#naRegion').value) || '').trim(),
+    detail: (($('#naDetail') && $('#naDetail').value) || '').trim(),
+    isDefault: !!(($('#naDefault') || {}).checked),
+  };
+  if (!body.name || !body.region || !body.detail) { toast('请完整填写收货人、所在地区与详细地址'); return; }
+  if (!/^\d{11}$/.test(body.phone)) { toast('手机号必须是 11 位数字'); return; }
+  const id = window._editAddrId;
+  if (busy) return;
+  busy = true;
+  try {
+    const saved = id
+      ? await api(`/api/addresses/${id}`, { method: 'PUT', body })
+      : await api('/api/addresses', { method: 'POST', body });
+    await refresh();
+    if (!window._buyAddr && saved) window._buyAddr = saved.id;
+    toast(id ? '地址已更新' : '地址已保存');
+    window._delPending = '';
+    renderAddrPicker();
+  } catch (e) {
+    toast('保存失败：' + e.message, 3200);
+  } finally { busy = false; }
+}
+async function setDefaultAddr(id) {
+  if (busy) return;
+  busy = true;
+  try {
+    await api(`/api/addresses/${id}/default`, { method: 'POST', body: {} });
+    await refresh();
+    toast('已设为默认地址');
+    renderAddrPicker();
+  } catch (e) { toast('操作被拒绝：' + e.message, 3200); } finally { busy = false; }
+}
+// 删除做二次确认：同一按钮再点一次才真正删除，避免误触
+function confirmDelAddr(id) {
+  if (window._delPending === id) { runDelAddr(id); return; }
+  window._delPending = id;
+  renderAddrPicker();
+  toast('再次点击「确认删除」即可删除该地址', 3200);
+  setTimeout(() => {
+    if (window._delPending !== id) return;
+    window._delPending = '';
+    if (document.querySelector('.addr-page')) renderAddrPicker();
+  }, 4000);
+}
+async function runDelAddr(id) {
+  if (busy) return;
+  busy = true;
+  try {
+    await api(`/api/addresses/${id}`, { method: 'DELETE' });
+    await refresh();
+    if (window._buyAddr === id) { const d = defaultAddress(); window._buyAddr = d ? d.id : ''; }
+    window._delPending = '';
+    toast('地址已删除');
+    renderAddrPicker();
+    render();
+  } catch (e) { toast('删除失败：' + e.message, 3200); } finally { busy = false; }
+}
+/* ---------- 用户头像：从本机选图，压缩后按账号存在浏览器本地 ---------- */
+function avatarKey() { return 'sco:avatar:' + (current ? current.id : ''); }
+function loadAvatar() {
+  try { return localStorage.getItem(avatarKey()) || ''; } catch (e) { return ''; }
+}
+function pickAvatar() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/png,image/jpeg,image/webp,image/gif';
+  input.onchange = () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { toast('图片不要超过 5MB'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        // 居中裁成正方形再缩到 160px，避免大头像把 localStorage 撑爆
+        const side = Math.min(img.width, img.height);
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 160;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, 160, 160);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.86);
+        try { localStorage.setItem(avatarKey(), dataUrl); } catch (e) { toast('头像保存失败'); return; }
+        toast('头像已更新');
+        render();
+      };
+      img.onerror = () => toast('图片解析失败，请换一张');
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  };
+  input.click();
+}
+// 退出登录：二次确认，避免误触；退出后清空本地身份并回到手机号登录页。
+function confirmLogout() {
   openModal(`<div class="detail-modal"><div class="deny">
-    <div class="ic">⛔</div><div class="t1">无权访问（越权拦截）</div>
-    <div class="t2">当前身份：<b>${esc(ROLES[current.role].label)} / ${esc(current.name)}</b><br/>
-    操作「${esc(action)}」已被后端拒绝（HTTP ${status || '-'}）。<br/>${esc(msg)}<br/><b>系统未做任何数据改动。</b></div>
-    <button class="primary wide" onclick="closeModal()">我知道了</button></div></div>`);
+    <div class="ic">👋</div><div class="t1">退出登录</div>
+    <div class="t2">当前账号：<b>${esc(current.phone || current.id)} · ${esc(current.name)}</b><br/>
+      退出后需要重新输入手机号与密码才能进入。</div>
+    <button class="primary wide" onclick="doLogout()">确认退出</button>
+    <button class="ghost wide" onclick="closeModal()">取消</button></div></div>`);
 }
 
 /* ================= B 端：工作台 ================= */
 function bizMenus(role) {
   if (role === 'ops') return [
     { label: '概览', icon: 'grid' }, { label: '商品管理', icon: 'bag' },
+    { label: '商品记录', icon: 'bag' }, // 新增 / 上下架留痕，与资金流水分开
     { label: '订单核查', icon: 'order' }, { label: '资金流水', icon: 'wallet' },
   ];
-  if (role === 'warehouse') return [{ label: '发货管理', icon: 'truck' }, { label: '发货记录', icon: 'order' }];
-  return [{ label: '退款审核', icon: 'refresh' }, { label: '异常支付', icon: 'alert' }, { label: '处理记录', icon: 'order' }];
+  if (role === 'warehouse') return [
+    { label: '发货管理', icon: 'truck' }, { label: '发货记录', icon: 'order' },
+    { label: '签收记录', icon: 'check' },
+  ];
+  return [
+    { label: '客服消息', icon: 'headset' },
+    { label: '退款审核', icon: 'refresh' }, { label: '异常支付', icon: 'alert' }, { label: '处理记录', icon: 'order' },
+  ];
 }
 function bizBadge(label) {
-  if (label === '退款审核') return db.refunds.filter((r) => r.status === 'PENDING').length;
+  if (label === '退款审核') return db.refunds.filter((r) => ['PENDING', 'AWAITING', 'FAILED'].includes(r.status)).length;
   if (label === '异常支付') return db.abnormal.filter((a) => a.status === 'PENDING').length;
+  // 客服消息徽标只提示「买家发了还没回」的会话，不等于会话总数
+  if (label === '客服消息') return unreadChatCount();
   return 0;
 }
 function renderBusiness() {
@@ -730,21 +1158,19 @@ function renderBusiness() {
   const menus = bizMenus(role);
   const paid = (db.summary && db.summary.receivedFen) || 0;
   const refunded = (db.summary && db.summary.refundedFen) || 0;
-  const forbidden = {
-    buyer: [], ops: ['下单/支付', '登记发货', '审核退款'],
-    warehouse: ['下单/支付', '商品上下架', '审核退款', '处理异常支付'],
-    cs: ['下单/支付', '商品上下架', '登记发货'],
-  }[role] || [];
   let body = '';
   if (role === 'ops' && bizPage === '概览') body = renderOpsOverview();
   else if (role === 'ops' && bizPage === '商品管理') body = renderProductManagement();
+  else if (role === 'ops' && bizPage === '商品记录') body = renderProductOps();
   else if (role === 'ops' && bizPage === '订单核查') body = renderOrderAudit();
-  else if (role === 'ops' && bizPage === '资金流水') body = renderLedgerPage(db.ledger);
+  else if (role === 'ops' && bizPage === '资金流水') body = renderLedgerPage(db.ledger.filter((l) => !/^商品/.test(l.type || '')));
   else if (role === 'warehouse' && bizPage === '发货管理') body = renderWarehouse();
   else if (role === 'warehouse' && bizPage === '发货记录') body = renderShipments();
+  else if (role === 'warehouse' && bizPage === '签收记录') body = renderSignRecords();
+  else if (role === 'cs' && bizPage === '客服消息') body = renderCsChats();
   else if (role === 'cs' && bizPage === '退款审核') body = renderRefundReview();
   else if (role === 'cs' && bizPage === '异常支付') body = renderExceptionReview();
-  else if (role === 'cs' && bizPage === '处理记录') body = renderLedgerPage(db.ledger.filter((l) => l.type === '退款' || l.type === '异常支付'));
+  else if (role === 'cs' && bizPage === '处理记录') body = renderCsRecords();
   else body = '<div class="empty-state">页面不存在</div>';
   const roleLabelOf = (r) => r === 'ops' ? '运营专员' : r === 'warehouse' ? '仓库管理员' : '售后客服';
   return `
@@ -755,13 +1181,12 @@ function renderBusiness() {
         ${menus.map((m) => `
         <button class="${bizPage === m.label ? 'active' : ''}" onclick="bizPage='${m.label}';render()">
           ${icon(m.icon, 19)}${m.label}
-          ${bizBadge(m.label) ? `<em>${bizBadge(m.label)}</em>` : ''}
+          ${bizBadge(m.label) ? `<em data-badge="${esc(m.label)}">${bizBadge(m.label)}</em>` : `<em data-badge="${esc(m.label)}" hidden></em>`}
         </button>`).join('')}
       </nav>
       <div class="permission-scope">
         <div>${icon('shield', 17)} 当前权限</div>
         ${(PERMISSIONS[role] || []).map((p) => `<span>${icon('check', 13)}${esc(p)}</span>`).join('')}
-        ${forbidden.length ? `<div class="guard-demo"><h4>🔒 越权演示</h4><p>真实调用其他角色接口，后端返回 403 并拒绝一切改动。</p><div class="forbidden">${forbidden.map((a) => `<button onclick="tryForbidden('${a}')">${a}</button>`).join('')}</div></div>` : ''}
       </div>
       <button class="logout" onclick="doLogout()">${icon('logout', 18)}退出工作台</button>
     </aside>
@@ -770,19 +1195,9 @@ function renderBusiness() {
         <div><span class="eyebrow">WORKSPACE</span><h1>${esc(bizPage)}</h1></div>
         <div class="header-tools">
           <button class="icon-button" onclick="refresh().then(()=>{render();toast('数据已刷新')})">${icon('bell')}</button>
-          <div class="role-selector">
-            <button onclick="showRoleMenu=!showRoleMenu;render()">
-              <span class="role-avatar ${role === 'cs' ? 'service' : role}">${icon(metaR.icon, 18)}</span>
-              <span><b>${esc(current.name)}</b><small>${esc(roleLabelOf(role))}</small></span>
-              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">${'<path d="m9 18 6-6-6-6"/>'}</svg>
-            </button>
-            ${showRoleMenu ? `<div class="role-menu">
-              ${['ops', 'warehouse', 'cs'].map((r) => `
-              <button class="${role === r ? 'active' : ''}" onclick="switchRole('${r}')">
-                <span>${roleLabelOf(r)} · ${(usersOf(r)[0] || {}).name || '-'}</span>
-                ${role === r ? icon('check', 15) : ''}
-              </button>`).join('')}
-            </div>` : ''}
+          <div class="role-badge">
+            <span class="role-avatar ${role === 'cs' ? 'service' : role}">${icon(metaR.icon, 18)}</span>
+            <span><b>${esc(current.name)}</b><small>${esc(roleLabelOf(role))}</small></span>
           </div>
         </div>
       </header>
@@ -790,59 +1205,89 @@ function renderBusiness() {
     </section>
   </main>`;
 }
-async function switchRole(role) {
-  if (!current || current.role === role) { showRoleMenu = false; render(); return; }
-  const u = usersOf(role)[0];
-  if (!u) { toast('该角色没有可用账号'); return; }
-  try {
-    await loginAs(role, u.id, '');
-    showRoleMenu = false;
-  } catch (e) { toast('切换身份失败：' + e.message, 3200); showRoleMenu = false; render(); }
-}
 
 /* ---------- 运营：概览 ---------- */
 function dayKey(t) { const d = new Date(t); const p = (n) => String(n).padStart(2, '0'); return `${p(d.getMonth() + 1)}/${p(d.getDate())}`; }
+// 交易趋势可选区间：近 3 日 / 近 7 日 / 本月 / 上个月
+let trendRange = '7d';
+const TREND_RANGES = [
+  { key: '3d', label: '近 3 日' },
+  { key: '7d', label: '近 7 日' },
+  { key: 'month', label: '本月' },
+  { key: 'lastMonth', label: '上个月' },
+];
+function trendRangeLabel() {
+  const r = TREND_RANGES.find((x) => x.key === trendRange);
+  return r ? r.label : '近 7 日';
+}
+// 生成区间内的自然日桶：本月 = 1 号到今天，上个月 = 整月，近 N 日 = 含今天在内的 N 天
+function trendBuckets(range) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const out = [];
+  if (range === 'month' || range === 'lastMonth') {
+    const base = new Date(today.getFullYear(), today.getMonth(), 1);
+    if (range === 'lastMonth') base.setMonth(base.getMonth() - 1, 1);
+    const end = range === 'month' ? today.getDate() : new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
+    for (let d = 1; d <= end; d++) out.push(new Date(base.getFullYear(), base.getMonth(), d));
+    return out;
+  }
+  const n = range === '3d' ? 3 : 7;
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    out.push(d);
+  }
+  return out;
+}
+function pickTrend(range) { trendRange = range; render(); }
 function renderOpsOverview() {
   const s = db.summary || {};
   const paid = s.receivedFen || 0;
   const refunded = s.refundedFen || 0;
   const pendingAbn = db.abnormal.filter((a) => a.status === 'PENDING').length;
-  // 近 7 日收款 / 退款（真实流水聚合）
-  const days = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date(Date.now() - i * 864e5);
-    days.push(d);
-  }
+  // 按所选区间聚合真实的收款 / 退款流水
+  const days = trendBuckets(trendRange);
+  const monthMode = trendRange === 'month' || trendRange === 'lastMonth';
   const sameDay = (t, d) => { const x = new Date(t); return x.getFullYear() === d.getFullYear() && x.getMonth() === d.getMonth() && x.getDate() === d.getDate(); };
   const income = days.map((d) => db.payments.filter((p) => sameDay(p.createdAt, d)).reduce((sum, p) => sum + p.amountFen, 0));
   const refund = days.map((d) => db.refunds.filter((r) => r.status === 'SUCCEEDED' && sameDay(r.updatedAt, d)).reduce((sum, r) => sum + r.amountFen, 0));
   const maxV = Math.max(1, ...income, ...refund);
-  const bars = days.map((d, i) => `
-    <div>
+  const labelStep = Math.max(1, Math.ceil(days.length / 7));
+  const bars = days.map((d, i) => {
+    const showLabel = i === days.length - 1 || i % labelStep === 0;
+    const label = monthMode ? `${d.getDate()}日` : dayKey(d);
+    return `
+    <div title="${dayKey(d)} 收款 ¥${formatYuan(income[i])} · 退款 ¥${formatYuan(refund[i])}">
       <span style="height:${Math.max(4, Math.round(income[i] / maxV * 100))}%"></span>
       <i style="height:${Math.max(2, Math.round(refund[i] / maxV * 100))}%"></i>
-      <small>${i === 6 ? '今天' : dayKey(d)}</small>
-    </div>`).join('');
+      <small>${showLabel ? label : ''}</small>
+    </div>`;
+  }).join('');
   const yMax = Math.ceil(maxV / 10000) * 10000 || 10000;
   const chartY = [4, 3, 2, 1, 0].map((i) => `<span>¥${formatYuan(yMax * i / 4)}</span>`).join('');
   const lowStock = db.products.filter((p) => p.available <= 2).length;
   return `
   <div class="metric-grid">
-    <div class="metric-card"><span class="metric-icon green">${icon('wallet')}</span><div><p>今日收款</p><h2>¥${formatYuan(paid)}</h2><small>已校验渠道通知</small></div></div>
+    <div class="metric-card"><span class="metric-icon green">${icon('wallet')}</span><div><p>今日收款</p><h2>¥${formatYuan(s.netFen != null ? s.netFen : paid - refunded)}</h2><small>已扣除退款 ¥${formatYuan(refunded)}</small></div></div>
     <div class="metric-card"><span class="metric-icon blue">${icon('order')}</span><div><p>订单总数</p><h2>${s.orderCount || db.orders.length}</h2><small>${db.orders.filter((o) => o.status === 'PENDING_PAY').length} 笔等待付款</small></div></div>
     <div class="metric-card"><span class="metric-icon orange">${icon('refresh')}</span><div><p>退款总额</p><h2>¥${formatYuan(refunded)}</h2><small>以渠道成功为准</small></div></div>
     <div class="metric-card"><span class="metric-icon red">${icon('alert')}</span><div><p>待处理异常</p><h2>${pendingAbn}</h2><small>需客服人工核实</small></div></div>
   </div>
   <div class="dashboard-grid">
     <section class="panel sales-panel">
-      <div class="panel-heading"><div><h2>交易趋势</h2><p>近 7 日收款与退款走势</p></div><button class="select-button">近 7 日 ${icon('chevron', 14)}</button></div>
+      <div class="panel-heading">
+        <div><h2>交易趋势</h2><p>${esc(trendRangeLabel())}收款与退款走势</p></div>
+        <select class="select-button" aria-label="选择统计区间"
+          onchange="pickTrend(this.value)">${TREND_RANGES.map((r) => `<option value="${r.key}"${r.key === trendRange ? ' selected' : ''}>${r.label}</option>`).join('')}</select>
+      </div>
       <div class="chart-area"><div class="chart-y">${chartY}</div><div class="bars">${bars}</div></div>
       <div class="chart-legend"><span><i class="income"></i>收款</span><span><i class="refund"></i>退款</span></div>
     </section>
     <section class="panel">
       <div class="panel-heading"><div><h2>库存健康度</h2><p>商品可售库存实时状态</p></div></div>
       <div class="stock-list">
-        ${db.products.map((p) => `
+        ${db.products.slice().sort((a, b) => a.available - b.available).slice(0, 6).map((p) => `
         <div class="${p.available <= 2 ? 'low' : ''}">
           <img src="${esc(p.image)}" alt=""/>
           <span><b>${esc(p.name)}</b><small>${esc(p.id)} · 已售 ${p.sales}</small></span>
@@ -850,7 +1295,7 @@ function renderOpsOverview() {
           <div class="stock-bar"><i style="width:${Math.min(100, p.total ? Math.round(p.available / p.total * 100) : 0)}%"></i></div>
         </div>`).join('')}
       </div>
-      <div class="stock-note">${icon('alert', 17)} 低于 2 件时触发库存预警${lowStock ? `（当前 ${lowStock} 个商品已预警）` : ''}</div>
+      <div class="stock-note">${icon('alert', 17)} 按可售从少到多显示前 6 个（共 ${db.products.length} 个商品）${lowStock ? `，其中 ${lowStock} 个已低于 2 件` : ''}</div>
     </section>
   </div>
   <section class="panel">
@@ -880,6 +1325,12 @@ function renderProductManagement() {
     <div id="productTableWrap">${productTable(list)}</div>
   </section>`;
 }
+// 商品展示状态：已下架 > 已售罄 > 在售（与服务端 Product.StatusLabel 一致）
+function productStatus(p) {
+  if (!p.onSale) return '已下架';
+  if (p.available <= 0) return '已售罄';
+  return '在售';
+}
 function productTable(list) {
   return `
     <div class="data-table">
@@ -887,40 +1338,94 @@ function productTable(list) {
       ${list.length === 0 ? '<div class="empty-state">没有匹配的商品</div>' : ''}
       ${list.map((p) => `
       <div class="tr">
-        <span class="product-cell"><img src="${esc(p.image)}" alt=""/><i><b>${esc(p.name)}</b><small>${esc(p.id)} · 已售 ${p.sales}</small></i></span>
+        <span class="product-cell"><img src="${esc(p.image)}" alt=""/><i><b>${esc(p.name)}</b><small>${esc(p.id)} · ${esc(p.category || '其他')} · 已售 ${p.sales}</small></i></span>
         <span>¥${formatYuan(p.priceFen)}</span>
         <span>${p.total}</span>
         <span><b>${p.available}</b> 件</span>
-        <span><i class="dot ${p.onSale ? 'online' : ''}"></i>${p.onSale ? '在售' : '已下架'}</span>
+        <span><i class="dot ${p.onSale && p.available > 0 ? 'online' : ''}"></i>${productStatus(p)}</span>
         <span><button class="${p.onSale ? 'danger-link' : 'link-button'}" onclick="toggleSale('${esc(p.id)}',${!p.onSale})">${p.onSale ? '下架' : '上架'}</button></span>
       </div>`).join('')}
     </div>`;
 }
 function renderProductTable() {
   const q = productQuery.trim().toLowerCase();
-  const list = db.products.filter((p) => !q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
+  const list = db.products.filter((p) => !q || p.name.toLowerCase().includes(q)
+    || p.id.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q));
   const wrap = $('#productTableWrap');
   if (wrap) wrap.innerHTML = productTable(list);
 }
+// 新建商品：分类 + 从本机选择图片上传（不提供任何内置示例图/默认图）
+const PRODUCT_CATEGORIES = ['家用电器', '电子产品', '儿童玩具', '书本', '食品', '家居生活', '其他'];
 function openCreateProduct() {
+  window._npFile = null;
   openModal(modalFrame('新建商品', 'bag', `
-    <p class="form-note" style="margin-top:16px">创建后默认在售，可在列表中下架。金额以「元」输入、按「分」提交。</p>
+    <p class="form-note" style="margin-top:16px">创建后默认在售，可在列表中下架。金额以「元」输入、按「分」提交；商品图片从本机选择，支持 JPG / PNG / WEBP / GIF，单张不超过 5MB。</p>
     <div class="form-grid">
       <label>商品名称<input id="npName" placeholder="例如：便携保温杯"/></label>
+      <label>商品分类<select id="npCategory">${PRODUCT_CATEGORIES.map((c) => `<option value="${c}">${c}</option>`).join('')}</select></label>
       <label>价格（元）<input id="npPrice" type="number" min="0.01" step="0.01" value="100"/></label>
       <label>库存（件）<input id="npStock" type="number" min="0" step="1" value="5"/></label>
     </div>
-    <button class="primary wide" onclick="submitCreateProduct()">确认创建</button>`));
+    <div class="img-field">
+      <label>商品图片</label>
+      <input id="npFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"
+        style="display:none" onchange="previewLocalImage(this)"/>
+      <div class="img-pick">
+        <button type="button" class="ghost" onclick="document.getElementById('npFile').click()">选择本地图片</button>
+        <small id="npFileName">未选择文件</small>
+      </div>
+      <div class="img-preview">
+        <img id="npPreview" alt="商品图片预览" hidden/>
+        <span id="npPlaceholder">尚未选择图片</span>
+      </div>
+    </div>
+    <button class="primary wide" id="npSubmit" onclick="submitCreateProduct()">确认创建</button>`));
 }
-function submitCreateProduct() {
+function previewLocalImage(input) {
+  const file = (input.files && input.files[0]) || null;
+  window._npFile = file;
+  const nameEl = $('#npFileName');
+  const img = $('#npPreview');
+  const ph = $('#npPlaceholder');
+  if (!file) {
+    if (nameEl) nameEl.textContent = '未选择文件';
+    if (img) { img.hidden = true; img.removeAttribute('src'); }
+    if (ph) ph.hidden = false;
+    return;
+  }
+  if (nameEl) nameEl.textContent = file.name;
+  if (img) { img.src = URL.createObjectURL(file); img.hidden = false; }
+  if (ph) ph.hidden = true;
+}
+async function uploadProductImage(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const data = await api('/api/uploads', { method: 'POST', body: fd });
+  if (!data || !data.url) throw new Error('上传失败：服务端未返回图片地址');
+  return data.url;
+}
+async function submitCreateProduct() {
   const name = ($('#npName') && $('#npName').value.trim()) || '';
+  const category = ($('#npCategory') && $('#npCategory').value) || '其他';
   const price = parseFloat(($('#npPrice') && $('#npPrice').value) || '0');
   const stock = parseInt(($('#npStock') && $('#npStock').value) || '-1', 10);
+  const file = window._npFile;
   if (!name) { toast('请填写商品名称'); return; }
   if (!Number.isFinite(price) || price <= 0) { toast('请填写有效价格'); return; }
   if (!Number.isInteger(stock) || stock < 0) { toast('库存必须为非负整数'); return; }
-  const priceFen = Math.round(price * 100);
-  act(() => api('/api/products', { method: 'POST', body: { name, priceFen, stock } }), '商品已创建并上架');
+  if (!file) { toast('请选择商品图片'); return; }
+  if (file.size > 5 * 1024 * 1024) { toast('图片不能超过 5MB'); return; }
+  const btn = $('#npSubmit');
+  if (btn) { btn.disabled = true; btn.textContent = '图片上传中…'; }
+  try {
+    const image = await uploadProductImage(file);
+    const priceFen = Math.round(price * 100);
+    window._npFile = null;
+    await act(() => api('/api/products', { method: 'POST', body: { name, image, category, priceFen, stock } }), '商品已创建并上架');
+  } catch (e) {
+    toast('创建失败：' + e.message, 3200);
+    if (btn) { btn.disabled = false; btn.textContent = '确认创建'; }
+  }
 }
 function toggleSale(pid, onSale) {
   act(() => api(`/api/products/${pid}/onsale`, { method: 'POST', body: { onSale } }), onSale ? '商品已重新上架' : '商品已下架，买家端将不可购买');
@@ -994,7 +1499,8 @@ function renderLedgerPage(list) {
   </section>`;
 }
 function exportLedgerCsv() {
-  const list = db.ledger || [];
+  // 导出同样只导资金流水，历史库里的商品动作不进入对账文件
+  const list = (db.ledger || []).filter((l) => !/^商品/.test(l.type || ''));
   const rows = [['流水号', '类型', '关联订单', '金额(分)', '记录时间', '说明']];
   list.forEach((l) => rows.push([l.id, l.type, l.orderId || '', l.amountFen, fmtTime(l.createdAt), l.note]));
   const csv = '\uFEFF' + rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n');
@@ -1042,9 +1548,9 @@ function shipOrder(id) {
 function renderShipments() {
   return `
   <section class="panel full-panel">
-    <div class="table-toolbar"><div><h2>已登记发货</h2><p>发货记录对订单唯一（共 ${db.shipments.length} 条）</p></div></div>
-    <div class="data-table ledger-table">
-      <div class="tr th"><span>发货单号</span><span>关联订单</span><span>承运方</span><span>运单号</span><span>发货时间</span><span>操作人</span></div>
+    <div class="table-toolbar"><div><h2>已登记发货</h2><p>发货记录对订单唯一（共 ${db.shipments.length} 条），签收情况由买家确认收货回写</p></div></div>
+    <div class="data-table ledger-table shipment-table">
+      <div class="tr th"><span>发货单号</span><span>关联订单</span><span>承运方</span><span>运单号</span><span>发货时间</span><span>操作人</span><span>签收情况</span></div>
       ${db.shipments.length === 0 ? '<div class="empty-state">暂无发货记录</div>' : ''}
       ${db.shipments.map((sh) => `
       <div class="tr">
@@ -1054,19 +1560,268 @@ function renderShipments() {
         <span class="mono">${esc(sh.trackingNo)}</span>
         <span>${fmtTime(sh.createdAt)}</span>
         <span>${esc(sh.operator || '-')}</span>
+        <span>${sh.signedAt ? `已签收 · ${fmtTime(sh.signedAt)}` : '<i class="dot"></i>运输中'}</span>
+      </div>`).join('')}
+    </div>
+  </section>`;
+}
+// 签收记录：只列已签收（买家确认收货）的发货单，用于仓库核对签收时间
+function renderSignRecords() {
+  const signed = db.shipments.filter((sh) => sh.signedAt);
+  return `
+  <div class="info-banner">${icon('check')}<div><b>签收记录来自买家「确认收货」</b><p>买家在订单里点确认收货后，订单状态变为已签收，同时把签收时间与签收人回写到这里的发货记录。</p></div></div>
+  <section class="panel full-panel">
+    <div class="table-toolbar"><div><h2>货物签收记录</h2><p>共 ${signed.length} 笔已签收（待签收 ${db.shipments.length - signed.length} 笔）</p></div></div>
+    <div class="data-table ledger-table">
+      <div class="tr th"><span>发货单号</span><span>关联订单</span><span>承运方</span><span>运单号</span><span>签收时间</span><span>签收人</span></div>
+      ${signed.length === 0 ? '<div class="empty-state">还没有买家签收</div>' : ''}
+      ${signed.map((sh) => `
+      <div class="tr">
+        <span class="mono">${esc(sh.id)}</span>
+        <span class="mono">${esc(sh.orderId)}</span>
+        <span>${esc(sh.carrier)}</span>
+        <span class="mono">${esc(sh.trackingNo)}</span>
+        <span>${fmtTime(sh.signedAt)}</span>
+        <span>${esc(sh.signedBy || '-')}</span>
       </div>`).join('')}
     </div>
   </section>`;
 }
 
+/* ---------- 运营：商品操作记录 ---------- */
+// 与资金流水刻意分开：资金流水只记钱，商品新增 / 上下架动作记在这里
+function renderProductOps() {
+  const list = (db.productOps || []).slice().reverse();
+  return `
+  <div class="info-banner">${icon('bag')}<div><b>商品操作与资金流水分离</b><p>这里只记录商品的「新增商品 / 商品上架 / 商品下架」，金额相关的收款与退款请到「资金流水」查看。</p></div></div>
+  <section class="panel full-panel">
+    <div class="table-toolbar"><div><h2>商品操作记录</h2><p>只增不改，共 ${list.length} 条</p></div></div>
+    <div class="data-table ledger-table">
+      <div class="tr th"><span>记录号</span><span>操作类型</span><span>商品编号</span><span>商品名称</span><span>操作人</span><span>操作时间</span></div>
+      ${list.length === 0 ? '<div class="empty-state">暂无商品操作记录</div>' : ''}
+      ${list.map((r) => `
+      <div class="tr">
+        <span class="mono">${esc(r.id)}</span>
+        <span><i class="ledger-dot ${esc(r.type)}"></i>${esc(r.type)}</span>
+        <span class="mono">${esc(r.productId || '-')}</span>
+        <span>${esc(r.name || '-')}</span>
+        <span>${esc(r.operator || '-')}</span>
+        <span>${fmtTime(r.createdAt)}</span>
+      </div>`).join('')}
+    </div>
+  </section>`;
+}
+
+/* ---------- 客服：会话列表 ---------- */
+// 未读口径：只有「最后一条消息是买家发的，且客服打开后的新消息」才算未读，
+// 客服回复完（最后一条变成客服自己）徽标立刻清零，不再拿会话总数当提醒。
+function chatReadKey() { return 'sco:chatread:' + (current ? current.id : ''); }
+function chatReadMap() {
+  try { return JSON.parse(localStorage.getItem(chatReadKey()) || '{}'); } catch (e) { return {}; }
+}
+function markChatRead(orderId, at) {
+  const m = chatReadMap();
+  m[orderId] = at || new Date().toISOString();
+  try { localStorage.setItem(chatReadKey(), JSON.stringify(m)); } catch (e) { /* 存储不可用时仅影响徽标 */ }
+}
+function myChatRole() { return current && current.role === 'cs' ? 'cs' : 'buyer'; }
+function threadUnread(t) {
+  // 未读 = 「对方」的最后一条消息我还没看过：客服看买家发言，买家看客服回复
+  if (!t || t.lastFromRole === myChatRole()) return false;
+  const readAt = chatReadMap()[t.orderId];
+  if (!readAt) return true;
+  return new Date(t.lastAt).getTime() > new Date(readAt).getTime();
+}
+function unreadChatCount() { return (db.threads || []).filter(threadUnread).length; }
+
+/* 买家侧弹提醒：客服回复后 8 秒轮询拉到新消息就 toast 一次；
+   登录时静默登记已有未读，避免每次登录都被历史消息轰炸。 */
+let chatToastSeen = {};
+function syncBuyerChatNotice(silent) {
+  if (!current || current.role !== 'buyer') return;
+  (db.threads || []).forEach((t) => {
+    if (!threadUnread(t)) { delete chatToastSeen[t.orderId]; return; }
+    if (chatToastSeen[t.orderId] === t.lastAt) return;   // 这条已经提醒过
+    chatToastSeen[t.orderId] = t.lastAt;
+    if (!silent) toast(`客服回复了订单 ${t.orderId} 的咨询，请在订单卡里点「客服有新回复」查看`, 4200);
+  });
+}
+// 不重绘整页，只更新侧边栏徽标，避免聊天时页面闪动
+function updateChatBadge() {
+  const el = document.querySelector('[data-badge="客服消息"]');
+  if (!el) return;
+  const n = unreadChatCount();
+  el.textContent = n || '';
+  el.hidden = !n;
+}
+function renderCsChats() {
+  const list = db.threads || [];
+  return `
+  <div class="info-banner">${icon('headset')}<div><b>买家可在订单里「联系客服」</b><p>买家发送的订单卡片会带上订单号、商品、金额与当时状态，点开即可查看订单详情并回复。</p></div></div>
+  <section class="panel full-panel">
+    <div class="table-toolbar"><div><h2>客服消息</h2><p>按最后一条消息时间排序（共 ${list.length} 个会话）</p></div></div>
+    <div class="chat-thread-list">
+      ${list.length === 0 ? '<div class="empty-state">还没有买家发起咨询</div>' : ''}
+      ${list.map((t) => `
+      <button class="chat-thread ${threadUnread(t) ? 'unread' : ''}" onclick="openOrderChat('${esc(t.orderId)}')">
+        <div class="chat-thread-avatar">${esc((t.buyerName || '买')[0])}</div>
+        <div class="chat-thread-main">
+          <div class="chat-thread-head"><b>${esc(t.buyerName || '买家')}</b>${threadUnread(t) ? '<i class="unread-dot"></i>' : ''}<small>${fmtRelTime(t.lastAt)}</small></div>
+          <p>${t.lastKind === 'order' ? '［订单卡片］' : esc(t.lastText || '')}</p>
+          <span class="mono">${esc(t.orderId)} · ${esc(t.productName || '')} · ${esc(stOf(t.orderStatus).label)}</span>
+        </div>
+        <em class="${threadUnread(t) ? 'wait' : ''}">${threadUnread(t) ? '待回复' : t.msgCount}</em>
+      </button>`).join('')}
+    </div>
+  </section>`;
+}
+
+/* ---------- 订单客服会话（买家 / 客服共用） ---------- */
+let chatOrder = null;
+let chatTimer = null;
+function stopChatPoll() {
+  if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
+  chatOrder = null;
+}
+function openOrderChat(orderId) {
+  stopChatPoll();
+  const o = orderFor(orderId);
+  openModal(modalFrame('联系客服', 'headset', `
+    <div class="chat-meta">
+      <img src="${esc(o.productImage || '')}" alt=""/>
+      <div><b>${esc(o.productName || '订单')}</b><small class="mono">${esc(orderId)}</small></div>
+      <span>${badge(o.status)}</span>
+    </div>
+    <div class="chat-body" id="chatBody"><div class="empty-state">加载中…</div></div>
+    <div class="chat-compose">
+      <textarea id="chatInput" rows="2" placeholder="描述你的问题，点发送即可"></textarea>
+      <div class="chat-actions">
+        <button class="ghost" onclick="sendOrderCard()">${icon('order', 15)} 发送订单卡片</button>
+        <button class="primary" onclick="sendChatText()">发送</button>
+      </div>
+    </div>`));
+  chatOrder = orderId; // openModal 内部会 closeModal（顺带停轮询），因此必须在打开之后再赋值
+  loadChat();
+  chatTimer = setInterval(loadChat, 4000);
+}
+function chatBubble(m) {
+  const mine = current && m.fromId === current.id;
+  if (m.kind === 'order') {
+    let c = {};
+    try { c = JSON.parse(m.text); } catch (e) { c = {}; }
+    const oid = c.orderId || m.orderId;
+    return `<div class="chat-row ${mine ? 'mine' : ''}">
+      <div class="chat-order-card">
+        <img src="${esc(c.productImage || '')}" alt=""/>
+        <div><b>${esc(c.productName || '订单')}</b>
+          <small class="mono">${esc(oid)} · ¥${formatYuan(c.amountFen)} × ${c.qty || 1}</small>
+          <em>${esc(c.statusLabel || '')}</em></div>
+        <button class="link-button" onclick="openOrderDetail('${esc(oid)}')">查看订单</button>
+      </div>
+      <span class="chat-time">${esc(m.fromName)} · ${fmtRelTime(m.createdAt)}</span></div>`;
+  }
+  return `<div class="chat-row ${mine ? 'mine' : ''}">
+    <div class="chat-bubble">${esc(m.text)}</div>
+    <span class="chat-time">${esc(m.fromName)} · ${fmtRelTime(m.createdAt)}</span></div>`;
+}
+async function loadChat() {
+  if (!chatOrder) return;
+  const box = $('#chatBody');
+  if (!box) { stopChatPoll(); return; }
+  try {
+    const msgs = await api(`/api/chat/${chatOrder}`);
+    box.innerHTML = (msgs && msgs.length)
+      ? msgs.map(chatBubble).join('')
+      : '<div class="empty-state">还没有消息，点下方「发送订单卡片」把订单发给客服</div>';
+    box.scrollTop = box.scrollHeight;
+    // 打开即视为已读：用最后一条消息的服务端时间做水位，避免本机与服务器时钟偏差导致永远「未读」
+    const lastAt = (msgs && msgs.length) ? msgs[msgs.length - 1].createdAt : new Date().toISOString();
+    markChatRead(chatOrder, lastAt);
+    updateChatBadge();
+  } catch (e) { /* 网络抖动时保持当前内容 */ }
+}
+async function sendChatText() {
+  const input = $('#chatInput');
+  const text = ((input && input.value) || '').trim();
+  if (!text) { toast('请先输入消息内容'); return; }
+  if (!chatOrder) return;
+  try {
+    await api(`/api/chat/${chatOrder}`, { method: 'POST', body: { kind: 'text', text } });
+    if (input) input.value = '';
+    await loadChat();
+    // 回复后最后一条消息变成客服自己，会话列表与徽标同步刷新
+    if (current && current.role === 'cs') { await refresh(); updateChatBadge(); }
+  } catch (e) { toast('发送失败：' + e.message, 3200); }
+}
+async function sendOrderCard() {
+  if (!chatOrder) return;
+  try {
+    await api(`/api/chat/${chatOrder}`, { method: 'POST', body: { kind: 'order' } });
+    await loadChat();
+    toast('订单卡片已发送');
+  } catch (e) { toast('发送失败：' + e.message, 3200); }
+}
+
+/* ---------- 商品评价（父子两级） ---------- */
+async function openReviews(productId, orderId) {
+  openModal(modalFrame('商品评价', 'user', `<div id="reviewWrap"><div class="empty-state">加载中…</div></div>`));
+  await loadReviews(productId, orderId || '');
+}
+async function loadReviews(productId, orderId) {
+  const wrap = $('#reviewWrap');
+  if (!wrap) return;
+  let list = [];
+  try { list = (await api(`/api/products/${productId}/reviews`)) || []; } catch (e) { list = []; }
+  const tops = list.filter((r) => !r.parentId).slice().reverse();
+  const order = orderId ? db.orders.find((o) => o.id === orderId) : null;
+  const canPost = !!(order && order.status === 'SIGNED');
+  const reviewed = tops.some((r) => r.orderId === orderId);
+  const repliesOf = (id) => list.filter((r) => r.parentId === id);
+  const replyBox = (id) => (canPost ? `
+    <div class="review-reply">
+      <textarea id="reply-${esc(id)}" rows="2" placeholder="回复这条评价…"></textarea>
+      <button class="secondary" onclick="submitReview('${esc(productId)}','${esc(orderId)}','${esc(id)}')">回复</button>
+    </div>` : '');
+  wrap.innerHTML = `
+    ${tops.length ? tops.map((r) => `
+      <article class="review-item">
+        <div class="review-head"><b>${esc(r.buyerName)}</b><small>${fmtRelTime(r.createdAt)} · ${esc(r.orderId)}</small></div>
+        <p>${esc(r.content)}</p>
+        ${repliesOf(r.id).map((c) => `
+          <div class="review-reply-item"><b>${esc(c.buyerName)}</b><span>${esc(c.content)}</span><small>${fmtRelTime(c.createdAt)}</small></div>`).join('')}
+        ${replyBox(r.id)}
+      </article>`).join('') : '<div class="empty-state">这件商品还没有评价</div>'}
+    ${canPost && !reviewed ? `
+      <div class="review-form">
+        <textarea id="reviewInput" rows="3" placeholder="说说这件商品的使用感受…"></textarea>
+        <button class="primary wide" onclick="submitReview('${esc(productId)}','${esc(orderId)}','')">发表评价</button>
+      </div>` : ''}
+    ${!orderId ? '<div class="form-note">只有已签收订单的买家可以评价或回复。</div>' : ''}`;
+}
+async function submitReview(productId, orderId, parentId) {
+  const el = parentId ? $('#reply-' + parentId) : $('#reviewInput');
+  const content = ((el && el.value) || '').trim();
+  if (!content) { toast('请先填写评价内容'); return; }
+  try {
+    await api(`/api/products/${productId}/reviews`, {
+      method: 'POST', body: { orderId, parentId, content },
+    });
+    toast(parentId ? '回复已发布' : '评价已发布');
+    await loadReviews(productId, orderId);
+  } catch (e) { toast('发布失败：' + e.message, 3200); }
+}
+
 /* ---------- 客服：退款审核 ---------- */
 function orderFor(orderId) { return db.orders.find((o) => o.id === orderId) || {}; }
 function renderRefundReview() {
+  // 退款审核只保留「还需要客服动作」的单子：已成功的退款移到「处理记录」，避免重复审核
+  const pending = db.refunds.filter((r) => ['PENDING', 'AWAITING', 'FAILED'].includes(r.status));
+  const done = db.refunds.length - pending.length;
   return `
   <div class="info-banner warm">${icon('alert')}<div><b>审核后将触发明确的状态迁移</b><p>同意并经渠道退款成功后恢复库存；拒绝后订单回到待发货状态。售前退款恢复库存，迟到支付退款不恢复。</p></div></div>
   <div class="review-list">
-    ${db.refunds.length === 0 ? '<div class="empty-state">暂无退款单</div>' : ''}
-    ${db.refunds.map((r) => {
+    ${pending.length === 0 ? `<div class="empty-state">暂无待处理的退款申请${done ? `，已处理的 ${done} 笔可在「处理记录」查看` : ''}</div>` : ''}
+    ${pending.map((r) => {
       const o = orderFor(r.orderId);
       const rst = REFUND_STATUS[r.status] || { label: r.status };
       let actions = '';
@@ -1130,11 +1885,14 @@ function retryRefund(rid) {
 
 /* ---------- 客服：异常支付 ---------- */
 function renderExceptionReview() {
+  // 已处理的异常支付同样移入「处理记录」，这里只留待人工核实
+  const pending = db.abnormal.filter((a) => a.status === 'PENDING');
+  const done = db.abnormal.length - pending.length;
   return `
   <div class="info-banner danger-banner">${icon('alert')}<div><b>迟到支付不会复活已关闭订单</b><p>人工核实后原路退款，不重新占用或恢复已在关单时释放的库存。</p></div></div>
   <div class="review-list">
-    ${db.abnormal.length === 0 ? '<div class="empty-state">暂无异常支付</div>' : ''}
-    ${db.abnormal.map((a) => {
+    ${pending.length === 0 ? `<div class="empty-state">暂无待处理的异常支付${done ? `，已处理的 ${done} 笔可在「处理记录」查看` : ''}</div>` : ''}
+    ${pending.map((a) => {
       const o = orderFor(a.orderId);
       return `
       <article class="review-card">
@@ -1156,6 +1914,54 @@ function renderExceptionReview() {
       </article>`;
     }).join('')}
   </div>`;
+}
+/* ---------- 客服：处理记录（已完成退款 / 已处理异常支付） ---------- */
+// 退款成功或拒绝、异常支付核实完毕后都会离开待办列表，处理结果在这里留档：
+// 单号、订单、金额、处理结果、处理时间、处理备注，便于事后追溯。
+function renderCsRecords() {
+  const refunds = db.refunds
+    .filter((r) => ['SUCCEEDED', 'REJECTED'].includes(r.status))
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+  const abnormals = db.abnormal
+    .filter((a) => a.status === 'HANDLED')
+    .sort((a, b) => new Date(b.handledAt || b.createdAt) - new Date(a.handledAt || a.createdAt));
+  return `
+  <div class="info-banner">${icon('order')}<div><b>已处理单据留档</b><p>退款成功 / 拒绝退款、异常支付核实退款后会自动从待办列表移到这里，记录处理结果与时间。</p></div></div>
+  <section class="panel full-panel">
+    <div class="table-toolbar"><div><h2>退款处理记录</h2><p>共 ${refunds.length} 笔</p></div></div>
+    <div class="data-table ledger-table record-table">
+      <div class="tr th"><span>退款单号</span><span>关联订单</span><span>买家</span><span>金额</span><span>处理结果</span><span>处理时间</span><span>处理备注</span></div>
+      ${refunds.length === 0 ? '<div class="empty-state">暂无退款处理记录</div>' : ''}
+      ${refunds.map((r) => {
+        const o = orderFor(r.orderId);
+        return `<div class="tr">
+          <span class="mono">${esc(r.id)}</span>
+          <span class="mono">${esc(r.orderId)}</span>
+          <span>${esc(o.buyerName || '-')}</span>
+          <span>¥${formatYuan(r.amountFen)}</span>
+          <span><i class="ledger-dot ${r.status === 'SUCCEEDED' ? '退款' : '退款拒绝'}"></i>${esc((REFUND_STATUS[r.status] || { label: r.status }).label)}</span>
+          <span>${fmtTime(r.updatedAt || r.createdAt)}</span>
+          <span>${esc(r.reviewNote || (r.status === 'SUCCEEDED' ? '渠道退款成功' : '已拒绝申请'))}</span>
+        </div>`;
+      }).join('')}
+    </div>
+  </section>
+  <section class="panel full-panel">
+    <div class="table-toolbar"><div><h2>异常支付处理记录</h2><p>共 ${abnormals.length} 笔</p></div></div>
+    <div class="data-table ledger-table record-table">
+      <div class="tr th"><span>异常单号</span><span>关联订单</span><span>渠道交易号</span><span>金额</span><span>处理结果</span><span>处理时间</span><span>处理备注</span></div>
+      ${abnormals.length === 0 ? '<div class="empty-state">暂无异常支付处理记录</div>' : ''}
+      ${abnormals.map((a) => `<div class="tr">
+          <span class="mono">${esc(a.id)}</span>
+          <span class="mono">${esc(a.orderId)}</span>
+          <span class="mono">${esc(a.channelTxnId || '-')}</span>
+          <span>¥${formatYuan(a.amountFen)}</span>
+          <span><i class="ledger-dot 退款"></i>已原路退款</span>
+          <span>${fmtTime(a.handledAt || a.createdAt)}</span>
+          <span>${esc(a.handleNote || a.reason || '-')}</span>
+        </div>`).join('')}
+    </div>
+  </section>`;
 }
 function openPayProof(aid) {
   const a = db.abnormal.find((x) => x.id === aid);

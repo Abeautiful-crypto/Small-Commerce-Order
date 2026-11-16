@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400" role="img" aria-label="儿童玩具">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fdf4ea"/><stop offset="1" stop-color="#f7e2cc"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#bg3)"/>
+  <circle cx="200" cy="205" r="118" fill="#ffffff" opacity="0.55"/>
+  <!-- 积木与小球 -->
+  <rect x="96" y="232" width="92" height="62" rx="12" fill="#e9875c"/>
+  <rect x="112" y="214" width="26" height="22" rx="7" fill="#f2a883"/>
+  <rect x="152" y="214" width="26" height="22" rx="7" fill="#f2a883"/>
+  <rect x="200" y="248" width="74" height="46" rx="10" fill="#5c8fa8"/>
+  <rect x="214" y="232" width="22" height="18" rx="6" fill="#8cb6c8"/>
+  <rect x="240" y="232" width="22" height="18" rx="6" fill="#8cb6c8"/>
+  <rect x="120" y="152" width="80" height="56" rx="12" fill="#e6b45c"/>
+  <rect x="136" y="136" width="22" height="18" rx="6" fill="#f0cd8d"/>
+  <rect x="164" y="136" width="22" height="18" rx="6" fill="#f0cd8d"/>
+  <circle cx="266" cy="188" r="38" fill="#78b79a"/>
+  <path d="M238 174a38 38 0 0 1 56 0" stroke="#a7d6c2" stroke-width="8" fill="none"/>
+  <ellipse cx="200" cy="316" rx="106" ry="14" fill="#ecd2b6" opacity="0.7"/>
+</svg>

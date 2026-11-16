@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400" role="img" aria-label="书本">
+  <defs>
+    <linearGradient id="bg4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7f2e8"/><stop offset="1" stop-color="#e9dfc9"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#bg4)"/>
+  <circle cx="200" cy="200" r="118" fill="#ffffff" opacity="0.6"/>
+  <!-- 书堆 -->
+  <rect x="94" y="248" width="212" height="34" rx="8" fill="#2f6b52"/>
+  <rect x="94" y="248" width="26" height="34" rx="8" fill="#245743"/>
+  <rect x="108" y="214" width="184" height="32" rx="8" fill="#c8874a"/>
+  <rect x="108" y="214" width="24" height="32" rx="8" fill="#a96d38"/>
+  <rect x="122" y="182" width="158" height="30" rx="8" fill="#5c8fa8"/>
+  <rect x="122" y="182" width="22" height="30" rx="8" fill="#467089"/>
+  <!-- 打开的书 -->
+  <path d="M200 108c-22-14-48-16-74-8v70c26-8 52-6 74 8z" fill="#fdfbf5" stroke="#d8cdb4" stroke-width="3"/>
+  <path d="M200 108c22-14 48-16 74-8v70c-26-8-52-6-74 8z" fill="#fdfbf5" stroke="#d8cdb4" stroke-width="3"/>
+  <path d="M200 108v70" stroke="#d8cdb4" stroke-width="3"/>
+  <path d="M142 122h40M142 136h40M142 150h32" stroke="#c9bda2" stroke-width="4" stroke-linecap="round"/>
+  <path d="M218 122h40M218 136h40M218 150h32" stroke="#c9bda2" stroke-width="4" stroke-linecap="round"/>
+  <ellipse cx="200" cy="300" rx="108" ry="14" fill="#ddcfb4" opacity="0.7"/>
+</svg>
