@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"small-commerce-order/internal/model"
 )
@@ -66,7 +67,7 @@ func (s *MySQLStore) ensureCatalog() error {
 		is_default  TINYINT(1)   NOT NULL DEFAULT 0,
 		created_at  DATETIME(3)  NOT NULL,
 		INDEX idx_addresses_user (user_id)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`); err != nil {
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='收货地址：每人最多 10 个、默认唯一，下单时快照进订单'`); err != nil {
 		return fmt.Errorf("确保 addresses 表失败：%w", err)
 	}
 	for _, p := range demoProducts() {
@@ -83,7 +84,52 @@ func (s *MySQLStore) ensureCatalog() error {
 			return fmt.Errorf("回填商品 %s 分类失败：%w", p.ID, err)
 		}
 	}
+	if err := s.ensureTableComments(); err != nil {
+		return err
+	}
 	return s.raiseSeq()
+}
+
+// tableComments 是各表的中文说明，写入 MySQL 表注释（数据库工具「注释」列可直接看到）。
+// 新库由 migrations/001_init.up.sql 的 COMMENT 建好；老库由 ensureTableComments 幂等补齐/覆盖。
+var tableComments = []struct{ table, comment string }{
+	{"products", "商品表：名称/分类/图片/单价(分)/总库存/可售库存/销量/上下架"},
+	{"orders", "订单表：买家与商品价格快照、支付方式、收货地址快照、状态机与关单/付款时间"},
+	{"payments", "收款记录：渠道交易号唯一，防重复收款与串单"},
+	{"notify_results", "渠道支付通知处理结果：只增不改，用于对账与审计"},
+	{"refunds", "退款单：售前/迟到来源、状态、客服审核与渠道重试、渠道退款号"},
+	{"shipments", "发货记录：一单只发一次，签收时间与签收人由买家确认收货回写"},
+	{"abnormal_payments", "异常收款登记：如迟到支付，记录处理结果与关联退款单"},
+	{"ledger", "资金流水：收款/退款/退款审核等与钱相关动作，只增不改"},
+	{"product_ops", "商品操作留痕：新增/上架/下架，与资金流水分开"},
+	{"reviews", "商品评论与回复：parent_id 为空是一级评论，否则为回复"},
+	{"chat_msgs", "订单客服消息：订单卡片(kind=order)与买卖双方文本"},
+	{"addresses", "收货地址：每人最多 10 个、默认唯一，下单时快照进订单"},
+	{"meta", "元数据：全局序号 seq、schema_version 等键值"},
+	{"users", "买家账号表：手机号登录，PBKDF2 密码哈希 + 随机盐"},
+	{"staff", "员工账号表：运营/仓库/客服，role 决定登录后落地页"},
+	{"tx_guard", "全局写事务串行化行锁：写事务先 SELECT ... FOR UPDATE 此行"},
+}
+
+// ensureTableComments 幂等补表注释：只在库里的注释与期望不一致时执行 ALTER（metadata-only，很快）。
+func (s *MySQLStore) ensureTableComments() error {
+	for _, tc := range tableComments {
+		var cur string
+		err := s.db.QueryRow(`SELECT table_comment FROM information_schema.tables
+			WHERE table_schema=DATABASE() AND table_name=?`, tc.table).Scan(&cur)
+		if err != nil {
+			continue // 表还不存在（异常情况）：留给建表流程
+		}
+		if cur == tc.comment {
+			continue
+		}
+		// DDL 不支持占位符参数；注释是代码内常量，只需转义单引号
+		ddl := "ALTER TABLE `" + tc.table + "` COMMENT='" + strings.ReplaceAll(tc.comment, "'", "''") + "'"
+		if _, err := s.db.Exec(ddl); err != nil {
+			return fmt.Errorf("写入 %s 表注释失败：%w", tc.table, err)
+		}
+	}
+	return nil
 }
 
 // ensureColumn 幂等补列：MySQL 8 不支持 ADD COLUMN IF NOT EXISTS，先查 information_schema。

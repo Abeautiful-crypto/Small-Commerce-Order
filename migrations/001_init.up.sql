@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS products (
   on_sale       TINYINT(1)   NOT NULL DEFAULT 1,
   sales         INT          NOT NULL DEFAULT 0,
   INDEX idx_products_category (category)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品表：名称/分类/图片/单价(分)/总库存/可售库存/销量/上下架';
 
 CREATE TABLE IF NOT EXISTS orders (
   id                VARCHAR(64)  NOT NULL PRIMARY KEY,
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS orders (
   -- 代价只与「已过期待付款订单数」成正比，与订单总量无关
   INDEX idx_orders_status_exp (status, expires_at),
   INDEX idx_orders_buyer (buyer_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单表：买家与商品价格快照、支付方式、收货地址快照、状态机与关单/付款时间';
 
 -- 幂等-支付：渠道交易号唯一，重复通知插不进去（防重复收款 / 防串单）
 CREATE TABLE IF NOT EXISTS payments (
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS payments (
   amount_fen     BIGINT       NOT NULL,
   created_at     DATETIME(3)  NOT NULL,
   UNIQUE KEY uk_payments_txn (channel_txn_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='收款记录：渠道交易号唯一，防重复收款与串单';
 
 -- 每笔渠道通知的处理结果（只增不改，可审计）
 CREATE TABLE IF NOT EXISTS notify_results (
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS notify_results (
   detail         VARCHAR(1024) NOT NULL,
   created_at     DATETIME(3)  NOT NULL,
   INDEX idx_notify_txn (channel_txn_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='渠道支付通知处理结果：只增不改，用于对账与审计';
 
 -- source（presale / late）决定退款成功时是否恢复库存
 CREATE TABLE IF NOT EXISTS refunds (
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS refunds (
   created_at        DATETIME(3)  NOT NULL,
   updated_at        DATETIME(3)  NOT NULL,
   INDEX idx_refunds_order (order_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='退款单：售前/迟到来源、状态、客服审核与渠道重试、渠道退款号';
 
 -- 发货记录对订单唯一：只能登记一次发货；签收时间由买家「确认收货」回写
 CREATE TABLE IF NOT EXISTS shipments (
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS shipments (
   signed_at   DATETIME(3)  NULL,
   signed_by   VARCHAR(128) NOT NULL DEFAULT '',
   UNIQUE KEY uk_shipments_order (order_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='发货记录：一单只发一次，签收时间与签收人由买家确认收货回写';
 
 CREATE TABLE IF NOT EXISTS abnormal_payments (
   id            VARCHAR(64)  NOT NULL PRIMARY KEY,
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS abnormal_payments (
   created_at    DATETIME(3)  NOT NULL,
   handled_at    DATETIME(3)  NULL,
   INDEX idx_abnormal_order (order_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='异常收款登记：如迟到支付，记录处理结果与关联退款单';
 
 -- 运营对账流水：只增不改，禁止 UPDATE / DELETE 历史行
 -- 只记录与钱相关的动作（收款 / 退款 / 退款审核 / 异常支付等），商品上下架不再写入本表
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS ledger (
   ref_id      VARCHAR(128) NOT NULL DEFAULT '',
   note        VARCHAR(1024) NOT NULL DEFAULT '',
   created_at  DATETIME(3)  NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='资金流水：收款/退款/退款审核等与钱相关动作，只增不改';
 
 -- 商品操作记录：新增商品 / 上架 / 下架，独立于资金流水
 CREATE TABLE IF NOT EXISTS product_ops (
@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS product_ops (
   name        VARCHAR(255) NOT NULL DEFAULT '',
   operator    VARCHAR(128) NOT NULL DEFAULT '',
   created_at  DATETIME(3)  NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品操作留痕：新增/上架/下架，与资金流水分开';
 
 -- 商品评论：parent_id 为空是一级评论，否则为回复（只支持两级）
 CREATE TABLE IF NOT EXISTS reviews (
@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at  DATETIME(3)  NOT NULL,
   INDEX idx_reviews_product (product_id),
   INDEX idx_reviews_order (order_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品评论与回复：parent_id 为空是一级评论，否则为回复';
 
 -- 订单客服消息：买家发送的订单卡片（kind=order）与双方文本消息
 CREATE TABLE IF NOT EXISTS chat_msgs (
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS chat_msgs (
   body        VARCHAR(2048) NOT NULL DEFAULT '',
   created_at  DATETIME(3)  NOT NULL,
   INDEX idx_chat_order (order_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单客服消息：订单卡片(kind=order)与买卖双方文本';
 
 -- 收货地址：买家可存多个，默认地址在本人地址内切换；下单时快照进订单
 CREATE TABLE IF NOT EXISTS addresses (
@@ -168,12 +168,12 @@ CREATE TABLE IF NOT EXISTS addresses (
   is_default  TINYINT(1)   NOT NULL DEFAULT 0,
   created_at  DATETIME(3)  NOT NULL,
   INDEX idx_addresses_user (user_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='收货地址：每人最多 10 个、默认唯一，下单时快照进订单';
 
 CREATE TABLE IF NOT EXISTS meta (
   k VARCHAR(64) NOT NULL PRIMARY KEY,
   v VARCHAR(255) NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='元数据：全局序号 seq、schema_version 等键值';
 
 -- 用户表：C 端买家账号（登录凭据，密文存储，不可逆）
 CREATE TABLE IF NOT EXISTS users (
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash VARCHAR(128) NOT NULL,
   salt          VARCHAR(64)  NOT NULL,
   created_at    DATETIME(3)  NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='买家账号表：手机号登录，PBKDF2 密码哈希 + 随机盐';
 
 -- 管理人员表：B 端工作台账号（运营 / 仓库 / 客服），role 决定登录后可见页面
 CREATE TABLE IF NOT EXISTS staff (
@@ -193,13 +193,13 @@ CREATE TABLE IF NOT EXISTS staff (
   salt          VARCHAR(64)  NOT NULL,
   created_at    DATETIME(3)  NOT NULL,
   INDEX idx_staff_role (role)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='员工账号表：运营/仓库/客服，role 决定登录后落地页';
 
 -- 全局写事务串行化行锁：所有跨表写事务先 SELECT ... FOR UPDATE 此行
 CREATE TABLE IF NOT EXISTS tx_guard (
   id   TINYINT NOT NULL PRIMARY KEY,
   note VARCHAR(64) NOT NULL DEFAULT ''
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='全局写事务串行化行锁：写事务先 SELECT ... FOR UPDATE 此行';
 
 INSERT IGNORE INTO tx_guard (id, note) VALUES (1, '全局写事务串行化行锁');
 INSERT IGNORE INTO meta (k, v) VALUES ('seq', '0');
