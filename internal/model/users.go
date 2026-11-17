@@ -28,6 +28,7 @@ func builtinUsers() []User {
 		{ID: "admin", Name: "运营专员", Role: RoleOps},
 		{ID: "wh", Name: "仓库管理员", Role: RoleWarehouse},
 		{ID: "cs", Name: "客服小花", Role: RoleCS},
+		{ID: "su", Name: "系统管理员", Role: RoleAdmin},
 		channelUser,
 	}
 }
@@ -85,7 +86,7 @@ func SideOf(role Role) string {
 	switch role {
 	case RoleBuyer:
 		return SideCustomer
-	case RoleOps, RoleWarehouse, RoleCS:
+	case RoleOps, RoleWarehouse, RoleCS, RoleAdmin:
 		return SideBusiness
 	}
 	return ""

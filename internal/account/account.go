@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,10 @@ type Repo interface {
 	Authenticate(phone, password string) (Account, bool)
 	// Register 注册一个买家账号（手机号唯一）。
 	Register(name, phone, password string) (Account, error)
+	// CreateStaff 由管理员新增一个 B 端员工账号（运营 / 仓库 / 客服 / 管理员）。
+	CreateStaff(name, phone, password string, role model.Role) (Account, error)
+	// ListStaff 返回全部 B 端员工账号（不含密码），供管理员页展示。
+	ListStaff() []Account
 	// List 返回全部账号，供身份目录同步与运维排查（不下发前端）。
 	List() []Account
 }
@@ -54,7 +59,29 @@ const (
 	ErrInvalidPhone    RegisterError = "手机号必须是 11 位数字"
 	ErrWeakPassword    RegisterError = "密码至少 6 位"
 	ErrTooLongPassword RegisterError = "密码最多 32 位"
+	ErrStaffRole       RegisterError = "员工角色只能是运营、仓库、客服或管理员"
+	ErrEmptyName       RegisterError = "姓名不能为空"
 )
+
+// IsStaffRole 判断角色是否属于 B 端员工角色（管理员新增账号时使用）。
+func IsStaffRole(role model.Role) bool {
+	switch role {
+	case model.RoleOps, model.RoleWarehouse, model.RoleCS, model.RoleAdmin:
+		return true
+	}
+	return false
+}
+
+// validateStaff 校验新增员工入参。
+func validateStaff(name, phone, password string, role model.Role) error {
+	if strings.TrimSpace(name) == "" {
+		return ErrEmptyName
+	}
+	if !IsStaffRole(role) {
+		return ErrStaffRole
+	}
+	return ValidateRegistration(phone, password)
+}
 
 // ValidateRegistration 校验注册入参：手机号 11 位数字、密码 6-32 位。
 func ValidateRegistration(phone, password string) error {
@@ -101,6 +128,7 @@ var Seed = []seedAccount{
 	{ID: "admin", Name: "运营专员", Role: model.RoleOps, Phone: "13900000001", Password: "123456"},
 	{ID: "wh", Name: "仓库管理员", Role: model.RoleWarehouse, Phone: "13900000002", Password: "123456"},
 	{ID: "cs", Name: "客服小花", Role: model.RoleCS, Phone: "13900000003", Password: "123456"},
+	{ID: "su", Name: "系统管理员", Role: model.RoleAdmin, Phone: "13900000000", Password: "123456"},
 }
 
 // ---------------- 密码派生 ----------------
@@ -316,6 +344,49 @@ func (r *MySQLRepo) Register(name, phone, password string) (Account, error) {
 	return a, nil
 }
 
+// CreateStaff 由管理员新增 B 端员工账号：手机号唯一，ID 由手机号派生（s+手机号）。
+func (r *MySQLRepo) CreateStaff(name, phone, password string, role model.Role) (Account, error) {
+	name = strings.TrimSpace(name)
+	if err := validateStaff(name, phone, password, role); err != nil {
+		return Account{}, err
+	}
+	if _, ok := r.FindByPhone(phone); ok {
+		return Account{}, ErrPhoneTaken
+	}
+	hash, salt, err := HashPassword(password)
+	if err != nil {
+		return Account{}, err
+	}
+	a := Account{ID: "s" + phone, Name: name, Role: role, Phone: phone}
+	if _, err := r.db.Exec(`INSERT INTO staff (id,name,role,phone,password_hash,salt,created_at) VALUES (?,?,?,?,?,?,?)`,
+		a.ID, a.Name, string(a.Role), a.Phone, hash, salt, time.Now()); err != nil {
+		return Account{}, fmt.Errorf("写入管理人员表失败：%w", err)
+	}
+	return a, nil
+}
+
+// ListStaff 只返回 staff 表（B 端），不含密码。
+func (r *MySQLRepo) ListStaff() []Account {
+	out := []Account{}
+	rows, err := r.db.Query(`SELECT id,name,role,phone FROM staff ORDER BY created_at, id`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a Account
+		var role string
+		var phone sql.NullString
+		if err := rows.Scan(&a.ID, &a.Name, &role, &phone); err != nil {
+			break
+		}
+		a.Role = model.Role(role)
+		a.Phone = phone.String
+		out = append(out, a)
+	}
+	return out
+}
+
 func (r *MySQLRepo) List() []Account {
 	out := []Account{}
 	rows, err := r.db.Query(`SELECT id,name,role,phone FROM staff ORDER BY id`)
@@ -428,6 +499,41 @@ func (r *MemRepo) Register(name, phone, password string) (Account, error) {
 	r.byID[a.ID] = c
 	r.byPhone[phone] = c
 	return a, nil
+}
+
+// CreateStaff 离线模式新增 B 端员工：规则与 MySQL 实现一致。
+func (r *MemRepo) CreateStaff(name, phone, password string, role model.Role) (Account, error) {
+	name = strings.TrimSpace(name)
+	if err := validateStaff(name, phone, password, role); err != nil {
+		return Account{}, err
+	}
+	hash, salt, err := HashPassword(password)
+	if err != nil {
+		return Account{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.byPhone[phone]; ok {
+		return Account{}, ErrPhoneTaken
+	}
+	a := Account{ID: "s" + phone, Name: name, Role: role, Phone: phone}
+	c := credential{acc: a, hash: hash, salt: salt}
+	r.byID[a.ID] = c
+	r.byPhone[phone] = c
+	return a, nil
+}
+
+// ListStaff 只返回 B 端角色账号。
+func (r *MemRepo) ListStaff() []Account {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := []Account{}
+	for _, c := range r.byID {
+		if IsStaffRole(c.acc.Role) {
+			out = append(out, c.acc)
+		}
+	}
+	return out
 }
 
 func (r *MemRepo) List() []Account {

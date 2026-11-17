@@ -1363,3 +1363,36 @@ select.select-button { appearance: none; -webkit-appearance: none; cursor: point
 .addr-card { display: block; }
 .addr-card-entry { display: flex; align-items: center; gap: 9px; width: 100%; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
 .addr-card-more { display: block; margin-top: 3px; font-size: 9px; color: #9aa39d; }
+
+/* ===== 角色卡：点击退出登录 ===== */
+.role-badge { cursor: pointer; font: inherit; }
+.role-badge:hover { border-color: #cfe0d6; background: #f7fbf8; }
+.role-badge > span:last-child { min-width: 74px; }
+.role-exit {
+  display: grid; place-items: center; padding-left: 9px; margin-left: 3px;
+  border-left: 1px solid var(--line); align-self: stretch; color: #98a29c;
+}
+.role-badge:hover .role-exit { color: #b4524a; }
+.role-avatar.admin { color: #8a2f3a; background: #fbeaec; }
+
+/* ===== 仓库：库存管理 ===== */
+.stock-table .tr { grid-template-columns: 2.2fr 0.6fr 0.7fr 0.6fr 0.55fr 0.5fr 0.85fr 0.8fr; min-width: 880px; }
+.stock-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.stock-name img { width: 32px; height: 32px; flex: none; object-fit: cover; border-radius: 7px; }
+.stock-name b { font-size: 9px; color: #344139; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.stock-qty {
+  width: 64px; height: 28px; padding: 0 6px; text-align: center;
+  border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: 11px; outline: 0;
+}
+.stock-qty:focus { border-color: var(--green); }
+.danger-text { color: #b4524a; }
+
+/* ===== 管理员：员工账号 ===== */
+.staff-table .tr { grid-template-columns: 1fr 1.2fr 0.9fr; min-width: 0; }
+.role-chip { font-style: normal; font-size: 9px; padding: 2px 8px; border-radius: 8px; background: #eaf1ec; color: #2c674f; }
+.role-chip.warehouse { background: #eaf0f5; color: #4b6580; }
+.role-chip.cs { background: #fbefdf; color: #966332; }
+.role-chip.admin { background: #fbeaec; color: #8a2f3a; }
+
+/* 空徽标不占位：避免每个菜单都挂一个黄点 */
+.sidebar nav button em[hidden] { display: none; }

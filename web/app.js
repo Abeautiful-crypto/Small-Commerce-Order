@@ -8,17 +8,19 @@
  */
 const SIDE = window.APP_SIDE === 'b' ? 'b' : 'c';
 const SIDE_LABEL = SIDE === 'c' ? 'C 端 · 买家' : 'B 端 · 工作台';
-const SIDE_ROLES = SIDE === 'c' ? ['buyer'] : ['ops', 'warehouse', 'cs'];
+const SIDE_ROLES = SIDE === 'c' ? ['buyer'] : ['ops', 'warehouse', 'cs', 'admin'];
 const ROLES = {
   buyer: { label: '买家', name: 'C 端 · 买家', ico: '🛒', desc: '逛店、下单、支付、取消、申请退款（仅自己的订单）' },
   ops: { label: '运营', name: 'B 端 · 工作台', ico: '📊', desc: '商品管理、订单核查、资金流水（不能改订单状态）' },
-  warehouse: { label: '仓库', name: 'B 端 · 工作台', ico: '📦', desc: '查待发货、登记发货（一次性，退款中不可发货）' },
+  warehouse: { label: '仓库', name: 'B 端 · 工作台', ico: '📦', desc: '查待发货、登记发货、给商品补货' },
   cs: { label: '客服', name: 'B 端 · 工作台', ico: '🎧', desc: '审核退款、渠道确认、处理迟到支付异常' },
+  admin: { label: '管理员', name: 'B 端 · 工作台', ico: '🛡', desc: '查看并操作全部 B 端功能，维护 B 端员工账号，看不到 C 端数据' },
 };
 const ROLE_META = {
   ops: { name: '林舟', label: '运营专员', icon: 'chart' },
   warehouse: { name: '周师傅', label: '仓库管理员', icon: 'box' },
   cs: { name: '陈禾', label: '售后客服', icon: 'headset' },
+  admin: { name: '系统管理员', label: '管理员', icon: 'shield' },
   buyer: { name: '张小买', label: '买家', icon: 'user' },
 };
 const STATUS = {
@@ -43,8 +45,9 @@ const STATUS_ORDER = ['PENDING_PAY', 'PENDING_SHIP', 'REFUNDING', 'SHIPPED', 'SI
 
 const PERMISSIONS = {
   ops: ['商品上下架', '库存查看', '交易汇总', '全链路对账'],
-  warehouse: ['待发货查看', '登记发货'],
+  warehouse: ['待发货查看', '登记发货', '商品补货'],
   cs: ['退款审核', '异常支付处理'],
+  admin: ['查看全部 B 端数据', 'B 端全功能操作', '新增 B 端员工账号'],
   buyer: ['浏览商品', '下单支付', '取消订单', '申请退款'],
 };
 
@@ -65,6 +68,7 @@ let db = {
   productOps: [],   // 商品操作记录（新增 / 上架 / 下架），与资金流水分开
   threads: [],      // 客服会话列表
   addresses: [],    // 买家收货地址（仅买家加载）
+  staff: [],        // B 端员工账号（仅管理员加载）
 };
 
 const $ = (s) => document.querySelector(s);
@@ -191,7 +195,9 @@ const ROUTE_GUARD = [
   { re: /^\/api\/products\/[^/]+\/reviews$/, roles: ['buyer'], action: '商品评价' },
   { re: /^\/api\/orders\/[^/]+\/ship$/, roles: ['warehouse'], action: '登记发货' },
   { re: /^\/api\/products$/, roles: ['ops'], action: '商品管理' },
-  { re: /^\/api\/products\/[^/]+\/onsale$/, roles: ['ops'], action: '商品上下架' },
+  { re: /^\/api\/products\/[^/]+\/onsale$/, roles: ['ops', 'admin'], action: '商品上下架' },
+  { re: /^\/api\/products\/[^/]+\/stock$/, roles: ['warehouse', 'ops', 'admin'], action: '商品补货' },
+  { re: /^\/api\/staff$/, roles: ['admin'], action: 'B 端员工管理' },
   { re: /^\/api\/refunds\/[^/]+\/(review|retry|channel-notify)$/, roles: ['cs'], action: '审核退款/处理异常支付' },
   { re: /^\/api\/abnormal\/[^/]+\/handle$/, roles: ['cs'], action: '处理异常支付' },
   { re: /^\/api\/reset$/, roles: ['ops'], action: '重置演示数据' },
@@ -264,16 +270,22 @@ async function refresh() {
     ]);
     db.products = products || []; db.orders = orders || []; db.threads = threads || [];
     db.addresses = addrs || [];
-  } else if (current.role === 'ops') {
-    const [st, summary] = await Promise.all([api('/api/state'), api('/api/summary')]);
+  } else if (current.role === 'ops' || current.role === 'admin') {
+    // 管理员与运营共用同一份全量快照；管理员额外拉员工账号
+    const reqs = [api('/api/state'), api('/api/summary')];
+    if (current.role === 'admin') reqs.push(api('/api/staff'), api('/api/chat/threads'));
+    const [st, summary, staff, threads] = await Promise.all(reqs);
     db.products = st.products || []; db.orders = st.orders || []; db.ledger = st.ledger || [];
     db.notifyResults = st.notifyResults || []; db.refunds = st.refunds || [];
     db.abnormal = st.abnormalPayments || []; db.shipments = st.shipments || [];
     db.payments = st.payments || []; db.summary = summary;
     db.productOps = st.productOps || [];
+    if (current.role === 'admin') { db.staff = staff || []; db.threads = threads || []; }
   } else if (current.role === 'warehouse') {
-    const [orders, shipments] = await Promise.all([api('/api/orders'), api('/api/shipments')]);
-    db.orders = orders || []; db.shipments = shipments || [];
+    const [orders, shipments, products] = await Promise.all([
+      api('/api/orders'), api('/api/shipments'), api('/api/products'),
+    ]);
+    db.orders = orders || []; db.shipments = shipments || []; db.products = products || [];
   } else if (current.role === 'cs') {
     const [refunds, abnormal, orders, threads] = await Promise.all([
       api('/api/refunds'), api('/api/abnormal'), api('/api/orders'), api('/api/chat/threads'),
@@ -324,7 +336,7 @@ window.addEventListener('focus', () => { pollOnce(); });
 function renderLogin() {
   const hint = SIDE === 'c'
     ? `当前是 <b>C 端买家页面</b>（独立端口），仅接受买家账号。运营 / 仓库 / 客服请打开 <b>B 端工作台</b> 页面登录。`
-    : `当前是 <b>B 端工作台</b>（独立端口），仅接受运营 / 仓库 / 客服账号。买家请打开 <b>C 端买家页面</b> 登录。`;
+    : `当前是 <b>B 端工作台</b>（独立端口），仅接受运营 / 仓库 / 客服 / 管理员账号。买家请打开 <b>C 端买家页面</b> 登录。`;
   $('#app').innerHTML = `
   <div class="login-page"><div class="login-card">
     <div class="login-brand">
@@ -347,7 +359,7 @@ function renderLogin() {
 // 注册：手机号 + 密码 + 昵称，注册成功自动回填手机号，用户直接登录即可
 function openRegister() {
   openModal(modalFrame('注册买家账号', 'user', `
-    <p class="form-note" style="margin-top:16px">手机号即登录账号（11 位数字），密码 6–32 位；注册后可直接用手机号登录 C 端。运营 / 仓库 / 客服账号由系统预置，不开放注册。</p>
+    <p class="form-note" style="margin-top:16px">手机号即登录账号（11 位数字），密码 6–32 位；注册后可直接用手机号登录 C 端。B 端账号不开放自助注册，由管理员在工作台「员工管理」里新增。</p>
     <div class="form-grid">
       <label>手机号<input id="regPhone" type="tel" inputmode="numeric" maxlength="11" placeholder="请输入 11 位手机号"/></label>
       <label>昵称<input id="regName" placeholder="不填自动生成" maxlength="20"/></label>
@@ -391,10 +403,13 @@ async function loginAs(phone, password) {
     throw new Error(`${ROLES[u.role] ? ROLES[u.role].label : u.role} 账号不属于 ${SIDE_LABEL}`);
   }
   current = { role: u.role, id: u.id, name: u.name || u.id, phone: u.phone || phone, token: (sess && sess.token) || '' };
-  db = { products: [], orders: [], refunds: [], abnormal: [], ledger: [], shipments: [], payments: [], notifyResults: [], summary: null };
+  db = {
+    products: [], orders: [], refunds: [], abnormal: [], ledger: [], shipments: [],
+    payments: [], notifyResults: [], summary: null, productOps: [], threads: [], addresses: [], staff: [],
+  };
   buyerTab = 'shop';
-  // 落地页严格按角色决定：运营→概览、仓库→发货管理、客服→退款审核
-  bizPage = u.role === 'ops' ? '概览' : u.role === 'warehouse' ? '发货管理' : '退款审核';
+  // 落地页严格按角色决定：运营/管理员→概览、仓库→发货管理、客服→退款审核
+  bizPage = (u.role === 'ops' || u.role === 'admin') ? '概览' : u.role === 'warehouse' ? '发货管理' : '退款审核';
   orderFilter = 'all'; auditFilter = '全部'; filterOpen = false; shopQuery = ''; productQuery = ''; cdReloaded = false;
   await refresh();
   lastSnap = dbSnapshot();
@@ -440,13 +455,10 @@ function render() {
     toast(`${bad} 账号不属于 ${SIDE_LABEL}，已退出登录`, 5000);
     return;
   }
-  const note = SIDE === 'c' ? '买家中心 · 仅本人订单' : '交易工作台 · ' + esc(ROLES[current.role].label) + '权限';
   $('#app').innerHTML = `
   <div class="app-shell">
     <header class="top-switcher">
       <div class="brand"><span class="brand-mark">${icon('logo', 22)}</span><span>衡序交易</span></div>
-      <div class="side-pill side-${SIDE}">${SIDE_LABEL}${location.port ? ' · :' + esc(location.port) : ''}</div>
-      <div class="prototype-note"><span></span> ${note}</div>
     </header>
     ${SIDE === 'c' ? renderCustomer() : renderBusiness()}
   </div>`;
@@ -1137,8 +1149,17 @@ function bizMenus(role) {
     { label: '订单核查', icon: 'order' }, { label: '资金流水', icon: 'wallet' },
   ];
   if (role === 'warehouse') return [
-    { label: '发货管理', icon: 'truck' }, { label: '发货记录', icon: 'order' },
-    { label: '签收记录', icon: 'check' },
+    { label: '发货管理', icon: 'truck' }, { label: '库存管理', icon: 'box' },
+    { label: '发货记录', icon: 'order' }, { label: '签收记录', icon: 'check' },
+  ];
+  if (role === 'admin') return [
+    { label: '概览', icon: 'grid' }, { label: '商品管理', icon: 'bag' }, { label: '商品记录', icon: 'bag' },
+    { label: '订单核查', icon: 'order' }, { label: '资金流水', icon: 'wallet' },
+    { label: '发货管理', icon: 'truck' }, { label: '库存管理', icon: 'box' },
+    { label: '发货记录', icon: 'order' }, { label: '签收记录', icon: 'check' },
+    { label: '客服消息', icon: 'headset' }, { label: '退款审核', icon: 'refresh' },
+    { label: '异常支付', icon: 'alert' }, { label: '处理记录', icon: 'order' },
+    { label: '员工管理', icon: 'user' },
   ];
   return [
     { label: '客服消息', icon: 'headset' },
@@ -1156,23 +1177,28 @@ function renderBusiness() {
   const role = current.role;
   const metaR = ROLE_META[role] || ROLE_META.ops;
   const menus = bizMenus(role);
-  const paid = (db.summary && db.summary.receivedFen) || 0;
-  const refunded = (db.summary && db.summary.refundedFen) || 0;
-  let body = '';
-  if (role === 'ops' && bizPage === '概览') body = renderOpsOverview();
-  else if (role === 'ops' && bizPage === '商品管理') body = renderProductManagement();
-  else if (role === 'ops' && bizPage === '商品记录') body = renderProductOps();
-  else if (role === 'ops' && bizPage === '订单核查') body = renderOrderAudit();
-  else if (role === 'ops' && bizPage === '资金流水') body = renderLedgerPage(db.ledger.filter((l) => !/^商品/.test(l.type || '')));
-  else if (role === 'warehouse' && bizPage === '发货管理') body = renderWarehouse();
-  else if (role === 'warehouse' && bizPage === '发货记录') body = renderShipments();
-  else if (role === 'warehouse' && bizPage === '签收记录') body = renderSignRecords();
-  else if (role === 'cs' && bizPage === '客服消息') body = renderCsChats();
-  else if (role === 'cs' && bizPage === '退款审核') body = renderRefundReview();
-  else if (role === 'cs' && bizPage === '异常支付') body = renderExceptionReview();
-  else if (role === 'cs' && bizPage === '处理记录') body = renderCsRecords();
-  else body = '<div class="empty-state">页面不存在</div>';
-  const roleLabelOf = (r) => r === 'ops' ? '运营专员' : r === 'warehouse' ? '仓库管理员' : '售后客服';
+  // 只渲染当前角色菜单里有的页面：手工改 bizPage 也进不去别的角色页面
+  if (!menus.some((m) => m.label === bizPage)) bizPage = menus[0].label;
+  const pages = {
+    '概览': () => renderOpsOverview(),
+    '商品管理': () => renderProductManagement(),
+    '商品记录': () => renderProductOps(),
+    '订单核查': () => renderOrderAudit(),
+    '资金流水': () => renderLedgerPage(db.ledger.filter((l) => !/^商品/.test(l.type || ''))),
+    '发货管理': () => renderWarehouse(),
+    '库存管理': () => renderInventory(),
+    '发货记录': () => renderShipments(),
+    '签收记录': () => renderSignRecords(),
+    '客服消息': () => renderCsChats(),
+    '退款审核': () => renderRefundReview(),
+    '异常支付': () => renderExceptionReview(),
+    '处理记录': () => renderCsRecords(),
+    '员工管理': () => renderStaffAdmin(),
+  };
+  const body = pages[bizPage] ? pages[bizPage]() : '<div class="empty-state">页面不存在</div>';
+  const roleLabelOf = (r) => r === 'ops' ? '运营专员'
+    : r === 'warehouse' ? '仓库管理员'
+      : r === 'admin' ? '管理员' : '售后客服';
   return `
   <main class="business-page">
     <aside class="sidebar">
@@ -1184,21 +1210,16 @@ function renderBusiness() {
           ${bizBadge(m.label) ? `<em data-badge="${esc(m.label)}">${bizBadge(m.label)}</em>` : `<em data-badge="${esc(m.label)}" hidden></em>`}
         </button>`).join('')}
       </nav>
-      <div class="permission-scope">
-        <div>${icon('shield', 17)} 当前权限</div>
-        ${(PERMISSIONS[role] || []).map((p) => `<span>${icon('check', 13)}${esc(p)}</span>`).join('')}
-      </div>
-      <button class="logout" onclick="doLogout()">${icon('logout', 18)}退出工作台</button>
     </aside>
     <section class="workspace">
       <header class="workspace-header">
         <div><span class="eyebrow">WORKSPACE</span><h1>${esc(bizPage)}</h1></div>
         <div class="header-tools">
-          <button class="icon-button" onclick="refresh().then(()=>{render();toast('数据已刷新')})">${icon('bell')}</button>
-          <div class="role-badge">
+          <button class="role-badge" title="点击退出登录" onclick="confirmLogout()">
             <span class="role-avatar ${role === 'cs' ? 'service' : role}">${icon(metaR.icon, 18)}</span>
             <span><b>${esc(current.name)}</b><small>${esc(roleLabelOf(role))}</small></span>
-          </div>
+            <span class="role-exit">${icon('logout', 15)}</span>
+          </button>
         </div>
       </header>
       <div class="workspace-body">${body}</div>
@@ -1208,60 +1229,95 @@ function renderBusiness() {
 
 /* ---------- 运营：概览 ---------- */
 function dayKey(t) { const d = new Date(t); const p = (n) => String(n).padStart(2, '0'); return `${p(d.getMonth() + 1)}/${p(d.getDate())}`; }
-// 交易趋势可选区间：近 3 日 / 近 7 日 / 本月 / 上个月
-let trendRange = '7d';
-const TREND_RANGES = [
-  { key: '3d', label: '近 3 日' },
-  { key: '7d', label: '近 7 日' },
+// 统计区间：近一周 / 本月 / 上个月 / 今年 / 去年（KPI 与趋势图共用同一口径）
+const STAT_RANGES = [
+  { key: '7d', label: '近一周' },
   { key: 'month', label: '本月' },
   { key: 'lastMonth', label: '上个月' },
+  { key: 'year', label: '今年' },
+  { key: 'lastYear', label: '去年' },
 ];
+let trendRange = '7d';
 function trendRangeLabel() {
-  const r = TREND_RANGES.find((x) => x.key === trendRange);
-  return r ? r.label : '近 7 日';
+  const r = STAT_RANGES.find((x) => x.key === trendRange);
+  return r ? r.label : '近一周';
 }
-// 生成区间内的自然日桶：本月 = 1 号到今天，上个月 = 整月，近 N 日 = 含今天在内的 N 天
-function trendBuckets(range) {
+// rangeOf 返回区间 [from, to) 与分桶单位（日 / 月）
+function rangeOf(key) {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  if (key === 'month') return { from: new Date(y, m, 1), to: new Date(y, m + 1, 1), unit: 'day' };
+  if (key === 'lastMonth') return { from: new Date(y, m - 1, 1), to: new Date(y, m, 1), unit: 'day' };
+  if (key === 'year') return { from: new Date(y, 0, 1), to: new Date(y + 1, 0, 1), unit: 'month' };
+  if (key === 'lastYear') return { from: new Date(y - 1, 0, 1), to: new Date(y, 0, 1), unit: 'month' };
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+  const from = new Date(today);
+  from.setDate(from.getDate() - 6);
+  const to = new Date(today);
+  to.setDate(to.getDate() + 1);
+  return { from, to, unit: 'day' };
+}
+// rangeBuckets 生成柱状图的分桶：日区间按天，年区间按月
+function rangeBuckets(key) {
+  const { from, to, unit } = rangeOf(key);
   const out = [];
-  if (range === 'month' || range === 'lastMonth') {
-    const base = new Date(today.getFullYear(), today.getMonth(), 1);
-    if (range === 'lastMonth') base.setMonth(base.getMonth() - 1, 1);
-    const end = range === 'month' ? today.getDate() : new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
-    for (let d = 1; d <= end; d++) out.push(new Date(base.getFullYear(), base.getMonth(), d));
+  if (unit === 'month') {
+    for (let i = 0; i < 12; i++) {
+      out.push({
+        start: new Date(from.getFullYear(), i, 1),
+        end: new Date(from.getFullYear(), i + 1, 1),
+        label: `${i + 1}月`,
+      });
+    }
     return out;
   }
-  const n = range === '3d' ? 3 : 7;
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    out.push(d);
+  for (let d = new Date(from); d < to; d.setDate(d.getDate() + 1)) {
+    out.push({ start: new Date(d), end: new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1), label: dayKey(d) });
   }
   return out;
 }
+function inRange(t, from, to) { const x = new Date(t); return !isNaN(x) && x >= from && x < to; }
+// 区间统计口径与后端 Summary 一致：只认资金流水里的「收款 / 退款」，商品动作流水不计入
+function rangeStats(key) {
+  const { from, to } = rangeOf(key);
+  const rows = db.ledger.filter((l) => !/^商品/.test(l.type || '') && inRange(l.createdAt, from, to));
+  const income = rows.filter((l) => l.type === '收款').reduce((a, l) => a + l.amountFen, 0);
+  const refund = rows.filter((l) => l.type === '退款').reduce((a, l) => a + l.amountFen, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const todayIncome = db.ledger
+    .filter((l) => l.type === '收款' && inRange(l.createdAt, today, tomorrow))
+    .reduce((a, l) => a + l.amountFen, 0);
+  return {
+    from, to, income, refund, net: income - refund, todayIncome,
+    orders: db.orders.filter((o) => inRange(o.createdAt, from, to)),
+  };
+}
 function pickTrend(range) { trendRange = range; render(); }
 function renderOpsOverview() {
-  const s = db.summary || {};
-  const paid = s.receivedFen || 0;
-  const refunded = s.refundedFen || 0;
+  const stat = rangeStats(trendRange);
+  const rangeLabel = trendRangeLabel();
   const pendingAbn = db.abnormal.filter((a) => a.status === 'PENDING').length;
-  // 按所选区间聚合真实的收款 / 退款流水
-  const days = trendBuckets(trendRange);
-  const monthMode = trendRange === 'month' || trendRange === 'lastMonth';
-  const sameDay = (t, d) => { const x = new Date(t); return x.getFullYear() === d.getFullYear() && x.getMonth() === d.getMonth() && x.getDate() === d.getDate(); };
-  const income = days.map((d) => db.payments.filter((p) => sameDay(p.createdAt, d)).reduce((sum, p) => sum + p.amountFen, 0));
-  const refund = days.map((d) => db.refunds.filter((r) => r.status === 'SUCCEEDED' && sameDay(r.updatedAt, d)).reduce((sum, r) => sum + r.amountFen, 0));
-  const maxV = Math.max(1, ...income, ...refund);
-  const labelStep = Math.max(1, Math.ceil(days.length / 7));
-  const bars = days.map((d, i) => {
-    const showLabel = i === days.length - 1 || i % labelStep === 0;
-    const label = monthMode ? `${d.getDate()}日` : dayKey(d);
+  const buckets = rangeBuckets(trendRange);
+  // 柱子表达「净收款」（收款 − 退款），与 KPI 卡口径一致：退款不会叠加进柱子
+  const bucketRows = buckets.map((b) => {
+    const rows = db.ledger.filter((l) => inRange(l.createdAt, b.start, b.end));
+    const plus = rows.filter((l) => l.type === '收款').reduce((a, l) => a + l.amountFen, 0);
+    const minus = rows.filter((l) => l.type === '退款').reduce((a, l) => a + l.amountFen, 0);
+    return { plus, minus, net: Math.max(0, plus - minus) };
+  });
+  const maxV = Math.max(1, ...bucketRows.map((r) => r.net));
+  const labelStep = Math.max(1, Math.ceil(buckets.length / 7));
+  const bars = buckets.map((b, i) => {
+    const show = i === buckets.length - 1 || i % labelStep === 0;
     return `
-    <div title="${dayKey(d)} 收款 ¥${formatYuan(income[i])} · 退款 ¥${formatYuan(refund[i])}">
-      <span style="height:${Math.max(4, Math.round(income[i] / maxV * 100))}%"></span>
-      <i style="height:${Math.max(2, Math.round(refund[i] / maxV * 100))}%"></i>
-      <small>${showLabel ? label : ''}</small>
+    <div title="${b.label} 净收款 ¥${formatYuan(bucketRows[i].net)}（收款 ¥${formatYuan(bucketRows[i].plus)} − 退款 ¥${formatYuan(bucketRows[i].minus)}）">
+      <span style="height:${bucketRows[i].net > 0 ? Math.max(4, Math.round(bucketRows[i].net / maxV * 100)) : 0}%"></span>
+      <small>${show ? b.label : ''}</small>
     </div>`;
   }).join('');
   const yMax = Math.ceil(maxV / 10000) * 10000 || 10000;
@@ -1269,20 +1325,20 @@ function renderOpsOverview() {
   const lowStock = db.products.filter((p) => p.available <= 2).length;
   return `
   <div class="metric-grid">
-    <div class="metric-card"><span class="metric-icon green">${icon('wallet')}</span><div><p>今日收款</p><h2>¥${formatYuan(s.netFen != null ? s.netFen : paid - refunded)}</h2><small>已扣除退款 ¥${formatYuan(refunded)}</small></div></div>
-    <div class="metric-card"><span class="metric-icon blue">${icon('order')}</span><div><p>订单总数</p><h2>${s.orderCount || db.orders.length}</h2><small>${db.orders.filter((o) => o.status === 'PENDING_PAY').length} 笔等待付款</small></div></div>
-    <div class="metric-card"><span class="metric-icon orange">${icon('refresh')}</span><div><p>退款总额</p><h2>¥${formatYuan(refunded)}</h2><small>以渠道成功为准</small></div></div>
-    <div class="metric-card"><span class="metric-icon red">${icon('alert')}</span><div><p>待处理异常</p><h2>${pendingAbn}</h2><small>需客服人工核实</small></div></div>
+    <div class="metric-card"><span class="metric-icon green">${icon('wallet')}</span><div><p>${esc(rangeLabel)}净收款</p><h2>¥${formatYuan(stat.net)}</h2><small>今日 ¥${formatYuan(stat.todayIncome)} · 收款 ¥${formatYuan(stat.income)} − 退款 ¥${formatYuan(stat.refund)}</small></div></div>
+    <div class="metric-card"><span class="metric-icon blue">${icon('order')}</span><div><p>${esc(rangeLabel)}订单</p><h2>${stat.orders.length}</h2><small>${db.orders.filter((o) => o.status === 'PENDING_PAY').length} 笔等待付款（当前）</small></div></div>
+    <div class="metric-card"><span class="metric-icon orange">${icon('refresh')}</span><div><p>${esc(rangeLabel)}退款</p><h2>¥${formatYuan(stat.refund)}</h2><small>以渠道成功为准，不计入柱子</small></div></div>
+    <div class="metric-card"><span class="metric-icon red">${icon('alert')}</span><div><p>待处理异常（当前）</p><h2>${pendingAbn}</h2><small>需客服人工核实</small></div></div>
   </div>
   <div class="dashboard-grid">
     <section class="panel sales-panel">
       <div class="panel-heading">
-        <div><h2>交易趋势</h2><p>${esc(trendRangeLabel())}收款与退款走势</p></div>
+        <div><h2>净收款走势</h2><p>${esc(rangeLabel)}按${rangeOf(trendRange).unit === 'month' ? '月' : '日'}统计，等于收款减退款</p></div>
         <select class="select-button" aria-label="选择统计区间"
-          onchange="pickTrend(this.value)">${TREND_RANGES.map((r) => `<option value="${r.key}"${r.key === trendRange ? ' selected' : ''}>${r.label}</option>`).join('')}</select>
+          onchange="pickTrend(this.value)">${STAT_RANGES.map((r) => `<option value="${r.key}"${r.key === trendRange ? ' selected' : ''}>${r.label}</option>`).join('')}</select>
       </div>
       <div class="chart-area"><div class="chart-y">${chartY}</div><div class="bars">${bars}</div></div>
-      <div class="chart-legend"><span><i class="income"></i>收款</span><span><i class="refund"></i>退款</span></div>
+      <div class="chart-legend"><span><i class="income"></i>净收款（收款 − 退款）</span><span>退款金额见上方第三张卡片</span></div>
     </section>
     <section class="panel">
       <div class="panel-heading"><div><h2>库存健康度</h2><p>商品可售库存实时状态</p></div></div>
@@ -1513,19 +1569,22 @@ function exportLedgerCsv() {
   toast('流水已导出为 CSV');
 }
 
-/* ---------- 仓库 ---------- */
-function renderWarehouse() {
-  const shippable = db.orders.filter((o) => o.status === 'PENDING_SHIP');
-  return `
-  <div class="info-banner">${icon('shield')}<div><b>发货状态校验已启用</b><p>仅「待发货」订单可登记一次发货；退款审核中的订单已自动从列表移除，重复登记会被后端拒绝。</p></div></div>
-  <section class="panel full-panel">
-    <div class="table-toolbar">
-      <div><h2>待发货任务</h2><p>共 ${shippable.length} 笔合法待处理订单</p></div>
-      <div class="small-search">${icon('search', 16)}<span>搜索订单号</span></div>
-    </div>
-    <div class="fulfillment-grid">
-      ${shippable.length === 0 ? '<div class="empty-state">暂无待发货订单</div>' : ''}
-      ${shippable.map((o) => `
+/* ---------- 仓库：发货管理 / 库存管理 ---------- */
+let shipQuery = '';
+function warehouseList() {
+  const q = shipQuery.trim().toLowerCase();
+  return db.orders
+    .filter((o) => o.status === 'PENDING_SHIP')
+    .filter((o) => !q || (o.id || '').toLowerCase().includes(q)
+      || (o.productName || '').toLowerCase().includes(q)
+      || (o.buyerName || '').toLowerCase().includes(q));
+}
+function warehouseCardsHTML() {
+  const list = warehouseList();
+  if (list.length === 0) {
+    return `<div class="empty-state">${shipQuery ? '没有匹配「' + esc(shipQuery) + '」的待发货订单' : '暂无待发货订单'}</div>`;
+  }
+  return list.map((o) => `
       <article>
         <div class="fulfill-head"><span><i></i>待发货</span><small>${fmtRelTime(o.createdAt)}</small></div>
         <div class="fulfill-product">
@@ -1537,9 +1596,86 @@ function renderWarehouse() {
           <span>实付 <b>¥${formatYuan(o.amountFen)}</b></span>
           <button class="primary" onclick="shipOrder('${esc(o.id)}')">${icon('truck', 17)}登记发货</button>
         </div>
-      </article>`).join('')}
+      </article>`).join('');
+}
+// 搜索只重绘卡片区，避免整页重绘导致输入框失焦
+function renderShipGrid() {
+  const grid = document.getElementById('shipGrid');
+  if (grid) grid.innerHTML = warehouseCardsHTML();
+  const cnt = document.getElementById('shipCount');
+  if (cnt) cnt.textContent = `共 ${warehouseList().length} 笔合法待处理订单${shipQuery ? '（已按关键词筛选）' : ''}`;
+}
+function renderWarehouse() {
+  return `
+  <div class="info-banner">${icon('shield')}<div><b>发货状态校验已启用</b><p>仅「待发货」订单可登记一次发货；退款审核中的订单已自动从列表移除，重复登记会被后端拒绝。</p></div></div>
+  <section class="panel full-panel">
+    <div class="table-toolbar">
+      <div><h2>待发货任务</h2><p id="shipCount">共 ${warehouseList().length} 笔合法待处理订单${shipQuery ? '（已按关键词筛选）' : ''}</p></div>
+      <div class="small-search">${icon('search', 16)}
+        <input value="${esc(shipQuery)}" placeholder="搜索订单号 / 商品 / 收件人" aria-label="搜索订单"
+          oninput="shipQuery=this.value;renderShipGrid()"/>
+      </div>
     </div>
+    <div class="fulfillment-grid" id="shipGrid">${warehouseCardsHTML()}</div>
   </section>`;
+}
+
+// 库存管理：给商品添加库存（总库存 + 可售同时增加）
+let stockQuery = '';
+function stockList() {
+  const q = stockQuery.trim().toLowerCase();
+  return db.products.filter((p) => !q || (p.name || '').toLowerCase().includes(q) || (p.id || '').toLowerCase().includes(q));
+}
+function stockRowsHTML() {
+  const list = stockList();
+  if (list.length === 0) return '<div class="empty-state">没有匹配的商品</div>';
+  return `
+    <div class="tr th"><span>商品</span><span>编号</span><span>单价</span><span>总库存</span><span>可售</span><span>已售</span><span>补货数量</span><span>操作</span></div>
+    ${list.map((p) => `
+    <div class="tr">
+      <span class="stock-name"><img src="${esc(p.image)}" alt=""/><b>${esc(p.name)}</b></span>
+      <span class="mono">${esc(p.id)}</span>
+      <span>¥${formatYuan(p.priceFen)}</span>
+      <span>${p.total}</span>
+      <span>${p.available <= 2 ? `<b class="danger-text">${p.available}</b>` : p.available}</span>
+      <span>${p.sales}</span>
+      <span><input class="stock-qty" id="qty-${esc(p.id)}" type="number" min="1" max="9999" step="1" value="10" aria-label="补货数量"/></span>
+      <span><button class="primary" onclick="addStock('${esc(p.id)}')">添加库存</button></span>
+    </div>`).join('')}`;
+}
+function renderStockTable() {
+  const box = document.getElementById('stockTable');
+  if (box) box.innerHTML = stockRowsHTML();
+}
+function renderInventory() {
+  return `
+  <div class="info-banner">${icon('box')}<div><b>库存管理：给商品补充库存</b><p>添加后总库存与可售数量同时增加，补货动作记录在「商品记录」里；下单扣减与补货共用同一把写事务，不会出现可售大于总库存。</p></div></div>
+  <section class="panel full-panel">
+    <div class="table-toolbar">
+      <div><h2>商品库存</h2><p>共 ${db.products.length} 个商品，可售低于 2 件会标红</p></div>
+      <div class="small-search">${icon('search', 16)}
+        <input value="${esc(stockQuery)}" placeholder="搜索商品名称 / 编号" aria-label="搜索商品"
+          oninput="stockQuery=this.value;renderStockTable()"/>
+      </div>
+    </div>
+    <div class="data-table stock-table" id="stockTable">${stockRowsHTML()}</div>
+  </section>`;
+}
+async function addStock(pid) {
+  const el = document.getElementById('qty-' + pid);
+  const qty = el ? Number(el.value) : 0;
+  if (!Number.isInteger(qty) || qty <= 0) { toast('请输入大于 0 的整数数量'); return; }
+  if (qty > 9999) { toast('单次最多添加 9999 件'); return; }
+  if (busy) { toast('操作进行中，请勿重复点击'); return; }
+  busy = true;
+  try {
+    const p = await api(`/api/products/${pid}/stock`, { method: 'POST', body: { qty } });
+    toast(`已为「${p.name}」添加 ${qty} 件，当前可售 ${p.available} 件`);
+    await refresh(); render();
+  } catch (e) {
+    toast('添加库存失败：' + e.message, 3200);
+    await refresh(); render();
+  } finally { busy = false; }
 }
 function shipOrder(id) {
   act(() => api(`/api/orders/${id}/ship`, { method: 'POST', body: { carrier: '顺丰速运', trackingNo: '' } }),
@@ -1610,6 +1746,65 @@ function renderProductOps() {
       </div>`).join('')}
     </div>
   </section>`;
+}
+
+/* ---------- 管理员：B 端员工账号 ---------- */
+const STAFF_ROLE_LABEL = { ops: '运营专员', warehouse: '仓库管理员', cs: '售后客服', admin: '管理员' };
+function renderStaffAdmin() {
+  const list = db.staff || [];
+  return `
+  <div class="info-banner">${icon('shield')}<div><b>管理员专属：维护 B 端员工账号</b><p>新建账号只能登录 B 端工作台，角色决定登录后可见的菜单；管理员可查看全部 B 端数据，但看不到 C 端买家数据。</p></div></div>
+  <div class="dashboard-grid" style="grid-template-columns:1.35fr 1fr">
+    <section class="panel">
+      <div class="panel-heading"><div><h2>员工账号</h2><p>共 ${list.length} 个 B 端账号</p></div></div>
+      <div class="data-table staff-table">
+        <div class="tr th"><span>姓名</span><span>登录手机号</span><span>角色</span></div>
+        ${list.length === 0 ? '<div class="empty-state">暂无员工账号</div>' : ''}
+        ${list.map((a) => `
+        <div class="tr">
+          <span><b>${esc(a.name)}</b></span>
+          <span class="mono">${esc(a.phone || '-')}</span>
+          <span><i class="role-chip ${esc(a.role)}">${esc(STAFF_ROLE_LABEL[a.role] || a.role)}</i></span>
+        </div>`).join('')}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-heading"><div><h2>新增 B 端账号</h2><p>创建后即可用手机号 + 初始密码登录</p></div></div>
+      <div class="form-grid">
+        <label>姓名<input id="stName" maxlength="20" placeholder="如 王仓管"/></label>
+        <label>手机号<input id="stPhone" maxlength="11" inputmode="numeric" placeholder="11 位手机号"/></label>
+        <label>初始密码<input id="stPwd" type="password" maxlength="32" placeholder="至少 6 位"/></label>
+        <label>角色
+          <select id="stRole">
+            <option value="ops">运营专员</option>
+            <option value="warehouse">仓库管理员</option>
+            <option value="cs">售后客服</option>
+            <option value="admin">管理员</option>
+          </select>
+        </label>
+      </div>
+      <p class="form-note" style="margin-top:12px">账号手机号不可重复；员工改角色后旧登录态立即失效，需要重新登录。</p>
+      <button class="primary wide" onclick="createStaff()">创建账号</button>
+    </section>
+  </div>`;
+}
+async function createStaff() {
+  const name = (($('#stName') || {}).value || '').trim();
+  const phone = (($('#stPhone') || {}).value || '').trim();
+  const password = ($('#stPwd') || {}).value || '';
+  const role = (($('#stRole') || {}).value || 'ops');
+  if (!name) { toast('请填写姓名'); return; }
+  if (!/^\d{11}$/.test(phone)) { toast('手机号必须是 11 位数字'); return; }
+  if (password.length < 6) { toast('初始密码至少 6 位'); return; }
+  if (busy) { toast('操作进行中，请勿重复点击'); return; }
+  busy = true;
+  try {
+    const r = await api('/api/staff', { method: 'POST', body: { name, phone, password, role } });
+    toast(`已创建${STAFF_ROLE_LABEL[r.user.role] || ''}账号：${r.user.phone} / 初始密码已设置`);
+    await refresh(); render();
+  } catch (e) {
+    toast('创建失败：' + e.message, 3200);
+  } finally { busy = false; }
 }
 
 /* ---------- 客服：会话列表 ---------- */

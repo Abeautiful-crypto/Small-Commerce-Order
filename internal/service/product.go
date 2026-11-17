@@ -48,7 +48,7 @@ func normalizeImage(raw string) (string, error) {
 
 // CreateProduct 运营新建商品（R8：商品维护属运营职责，创建后默认在售并记流水）。
 func (s *Service) CreateProduct(actor model.Actor, name, image, category string, priceFen, stock int64) (*model.Product, error) {
-	if err := requireRole(actor, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	name = strings.TrimSpace(name)
@@ -84,6 +84,36 @@ func (s *Service) CreateProduct(actor model.Actor, name, image, category string,
 		}
 		st.Products = append(st.Products, p)
 		st.AppendProductOp("新增商品", p.ID, p.Name, actor.Name, s.now())
+		out = p
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AddStock 仓库给商品补货：总库存与可售数量同时增加，并写入商品操作留痕。
+// 与下单扣减共用同一把写事务，保证 available 与 total 始终一致。
+func (s *Service) AddStock(actor model.Actor, productID string, qty int64) (*model.Product, error) {
+	if err := requireRole(actor, model.RoleWarehouse, model.RoleOps, model.RoleAdmin); err != nil {
+		return nil, err
+	}
+	if qty <= 0 {
+		return nil, bad("添加数量必须大于 0")
+	}
+	if qty > 9999 {
+		return nil, bad("单次最多添加 9999 件")
+	}
+	var out *model.Product
+	err := s.st.Update(func(st *model.State) error {
+		p := st.Product(productID)
+		if p == nil {
+			return notFound("商品不存在")
+		}
+		p.Total += int(qty)
+		p.Available += int(qty)
+		st.AppendProductOp("添加库存", p.ID, p.Name, actor.Name, s.now())
 		out = p
 		return nil
 	})

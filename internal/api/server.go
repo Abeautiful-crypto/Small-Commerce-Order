@@ -332,6 +332,42 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, envelope{OK: true, Data: map[string]any{"user": acc}})
 	})
 
+	// B 端员工账号：只有管理员能看列表与新增；新增角色限定在运营 / 仓库 / 客服 / 管理员。
+	mux.HandleFunc("GET /api/staff", func(w http.ResponseWriter, r *http.Request) {
+		if actor := s.actorFrom(r); actor.Role != model.RoleAdmin {
+			writeErr(w, &service.BizError{Code: service.CodeForbidden, Message: "无权查看员工账号：仅管理员"})
+			return
+		}
+		writeJSON(w, http.StatusOK, envelope{OK: true, Data: s.accounts.ListStaff()})
+	})
+	mux.HandleFunc("POST /api/staff", func(w http.ResponseWriter, r *http.Request) {
+		if actor := s.actorFrom(r); actor.Role != model.RoleAdmin {
+			writeErr(w, &service.BizError{Code: service.CodeForbidden, Message: "无权新增员工账号：仅管理员"})
+			return
+		}
+		var req struct {
+			Name     string `json:"name"`
+			Phone    string `json:"phone"`
+			Password string `json:"password"`
+			Role     string `json:"role"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			writeErr(w, err)
+			return
+		}
+		acc, err := s.accounts.CreateStaff(req.Name, strings.TrimSpace(req.Phone), req.Password, model.Role(req.Role))
+		if err != nil {
+			code := service.CodeBadRequest
+			if err == account.ErrPhoneTaken {
+				code = service.CodeConflict
+			}
+			writeErr(w, &service.BizError{Code: code, Message: err.Error()})
+			return
+		}
+		model.AddUser(model.User{ID: acc.ID, Name: acc.Name, Role: acc.Role})
+		writeJSON(w, http.StatusOK, envelope{OK: true, Data: map[string]any{"user": acc}})
+	})
+
 	// 演示接口只在 demo 模式注册；生产模式下这两个路径不存在。
 	if !s.production {
 		mux.HandleFunc("POST /api/reset", s.h(func(r *http.Request) (any, error) {
@@ -365,12 +401,22 @@ func (s *Server) Handler() http.Handler {
 		}
 		return map[string]any{"onSale": req.OnSale}, s.svc.SetOnSale(s.actorFrom(r), r.PathValue("id"), req.OnSale)
 	}))
+	// 库存管理：仓库给商品补货，总库存与可售数量同时增加（运营 / 管理员同样可用）
+	mux.HandleFunc("POST /api/products/{id}/stock", s.h(func(r *http.Request) (any, error) {
+		var req struct {
+			Qty int64 `json:"qty"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			return nil, err
+		}
+		return s.svc.AddStock(s.actorFrom(r), r.PathValue("id"), req.Qty)
+	}))
 
 	// 商品图片上传：运营从本机选图后直传服务端，落盘到 web/uploads 并返回站内 URL。
 	// 仅接受 jpg/png/webp/gif，单文件上限 5MB；文件名由服务端随机生成，不使用客户端文件名。
 	mux.HandleFunc("POST /api/uploads", func(w http.ResponseWriter, r *http.Request) {
 		actor := s.actorFrom(r)
-		if actor.Role != model.RoleOps {
+		if actor.Role != model.RoleOps && actor.Role != model.RoleAdmin {
 			writeErr(w, &service.BizError{Code: service.CodeForbidden, Message: "无权上传：仅运营可维护商品图片"})
 			return
 		}

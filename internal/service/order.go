@@ -9,7 +9,7 @@ import (
 
 // SetOnSale 运营维护商品上下架（R8：运营不能改订单状态，只能改商品）。
 func (s *Service) SetOnSale(actor model.Actor, productID string, onSale bool) error {
-	if err := requireRole(actor, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleOps, model.RoleAdmin); err != nil {
 		return err
 	}
 	return s.st.Update(func(st *model.State) error {

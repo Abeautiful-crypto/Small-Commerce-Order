@@ -57,7 +57,7 @@ func (s *Service) ApplyRefund(actor model.Actor, orderID, reason string) (*model
 
 // ReviewRefund 客服审核：同意→等待渠道确认；拒绝→退回待发货（可继续发货）。
 func (s *Service) ReviewRefund(actor model.Actor, refundID string, approve bool, note string) (*model.Refund, error) {
-	if err := requireRole(actor, model.RoleCS); err != nil {
+	if err := requireRole(actor, model.RoleCS, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	var out *model.Refund
@@ -98,7 +98,7 @@ func (s *Service) ReviewRefund(actor model.Actor, refundID string, approve bool,
 func (s *Service) HandleRefundChannelNotify(actor model.Actor, refundID string, success bool, channelRefundID string) (*model.Refund, error) {
 	// 演示态：模拟渠道退款结果由客服或运营触发，必须校验真实身份。
 	// 生产环境应改为带渠道签名的回调（与支付通知对称），不能沿用登录身份。
-	if err := requireRole(actor, model.RoleCS, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleCS, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	var out *model.Refund
@@ -163,7 +163,7 @@ func (s *Service) HandleRefundChannelNotify(actor model.Actor, refundID string, 
 
 // RetryRefund 渠道失败后重试：状态回到等待渠道确认。
 func (s *Service) RetryRefund(actor model.Actor, refundID string) (*model.Refund, error) {
-	if err := requireRole(actor, model.RoleCS); err != nil {
+	if err := requireRole(actor, model.RoleCS, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	var out *model.Refund
@@ -189,7 +189,7 @@ func (s *Service) RetryRefund(actor model.Actor, refundID string) (*model.Refund
 
 // HandleAbnormalPayment 客服核实迟到支付后发起退款：退款单来源固定为 late，绝不恢复库存。
 func (s *Service) HandleAbnormalPayment(actor model.Actor, abnormalID, note string) (*model.Refund, error) {
-	if err := requireRole(actor, model.RoleCS); err != nil {
+	if err := requireRole(actor, model.RoleCS, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	var out *model.Refund
@@ -234,7 +234,7 @@ func (s *Service) HandleAbnormalPayment(actor model.Actor, abnormalID, note stri
 // Ship R7：仓库只能为合法待发货订单登记一次发货；发货记录对订单唯一。
 // 发货是「占用转消耗」，可售数量在下单时已预扣，此处不再改动库存。
 func (s *Service) Ship(actor model.Actor, orderID, carrier, trackingNo string) (*model.Shipment, error) {
-	if err := requireRole(actor, model.RoleWarehouse); err != nil {
+	if err := requireRole(actor, model.RoleWarehouse, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	var out *model.Shipment

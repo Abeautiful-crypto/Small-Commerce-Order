@@ -82,6 +82,8 @@ func roleLabel(r model.Role) string {
 		return "仓库"
 	case model.RoleCS:
 		return "客服"
+	case model.RoleAdmin:
+		return "管理员"
 	case model.RoleChannel:
 		return "模拟支付渠道"
 	}
@@ -117,7 +119,7 @@ func (s *Service) verify(in model.PaymentIntent) bool {
 func (s *Service) snapshot() (*model.State, error) { return s.st.Snapshot() }
 
 func (s *Service) Products(actor model.Actor) ([]*model.Product, error) {
-	if err := requireRole(actor, model.RoleBuyer, model.RoleOps, model.RoleWarehouse, model.RoleCS); err != nil {
+	if err := requireRole(actor, model.RoleBuyer, model.RoleOps, model.RoleWarehouse, model.RoleCS, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -153,13 +155,13 @@ func (s *Service) Orders(actor model.Actor) ([]*model.Order, error) {
 			}
 		}
 		return out, nil
-	case model.RoleOps, model.RoleCS:
-		if err := requireRole(actor, model.RoleOps, model.RoleCS); err != nil {
+	case model.RoleOps, model.RoleCS, model.RoleAdmin:
+		if err := requireRole(actor, model.RoleOps, model.RoleCS, model.RoleAdmin); err != nil {
 			return nil, err
 		}
 		return st.Orders, nil
 	case model.RoleWarehouse:
-		if err := requireRole(actor, model.RoleWarehouse); err != nil {
+		if err := requireRole(actor, model.RoleWarehouse, model.RoleAdmin); err != nil {
 			return nil, err
 		}
 		out := []*model.Order{}
@@ -174,7 +176,7 @@ func (s *Service) Orders(actor model.Actor) ([]*model.Order, error) {
 }
 
 func (s *Service) GetOrder(actor model.Actor, id string) (*model.Order, error) {
-	if err := requireRole(actor, model.RoleBuyer, model.RoleOps, model.RoleWarehouse, model.RoleCS); err != nil {
+	if err := requireRole(actor, model.RoleBuyer, model.RoleOps, model.RoleWarehouse, model.RoleCS, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -192,7 +194,7 @@ func (s *Service) GetOrder(actor model.Actor, id string) (*model.Order, error) {
 }
 
 func (s *Service) Refunds(actor model.Actor) ([]*model.Refund, error) {
-	if err := requireRole(actor, model.RoleCS, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleCS, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -203,7 +205,7 @@ func (s *Service) Refunds(actor model.Actor) ([]*model.Refund, error) {
 }
 
 func (s *Service) AbnormalPayments(actor model.Actor) ([]*model.AbnormalPayment, error) {
-	if err := requireRole(actor, model.RoleCS, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleCS, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -214,7 +216,7 @@ func (s *Service) AbnormalPayments(actor model.Actor) ([]*model.AbnormalPayment,
 }
 
 func (s *Service) Shipments(actor model.Actor) ([]*model.Shipment, error) {
-	if err := requireRole(actor, model.RoleWarehouse, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleWarehouse, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -227,7 +229,7 @@ func (s *Service) Shipments(actor model.Actor) ([]*model.Shipment, error) {
 // Ledger 资金流水：只返回与钱相关的记录。
 // 历史库里残留的「商品上架 / 商品下架」在读取时过滤，保证对账口径不被商品动作污染。
 func (s *Service) Ledger(actor model.Actor) ([]*model.LedgerEntry, error) {
-	if err := requireRole(actor, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -251,7 +253,7 @@ func isProductOpLedger(typ string) bool {
 
 // ProductOps 商品操作记录（新增 / 上架 / 下架），仅运营可见。
 func (s *Service) ProductOps(actor model.Actor) ([]*model.ProductOp, error) {
-	if err := requireRole(actor, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -264,7 +266,7 @@ func (s *Service) ProductOps(actor model.Actor) ([]*model.ProductOp, error) {
 }
 
 func (s *Service) NotifyResults(actor model.Actor) ([]*model.NotifyResult, error) {
-	if err := requireRole(actor, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -289,7 +291,7 @@ type Summary struct {
 }
 
 func (s *Service) Summary(actor model.Actor) (*Summary, error) {
-	if err := requireRole(actor, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	st, err := s.snapshot()
@@ -323,7 +325,7 @@ func (s *Service) Summary(actor model.Actor) (*Summary, error) {
 
 // Reset 恢复演示预置数据（仅运营）。
 func (s *Service) Reset(actor model.Actor) error {
-	if err := requireRole(actor, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleOps, model.RoleAdmin); err != nil {
 		return err
 	}
 	return s.st.Reset()
@@ -331,7 +333,7 @@ func (s *Service) Reset(actor model.Actor) error {
 
 // State 返回完整状态快照，供运营核查页一次性拉取（越权不可见其它角色专属数据由前端控制）。
 func (s *Service) State(actor model.Actor) (*model.State, error) {
-	if err := requireRole(actor, model.RoleOps); err != nil {
+	if err := requireRole(actor, model.RoleOps, model.RoleAdmin); err != nil {
 		return nil, err
 	}
 	return s.snapshot()

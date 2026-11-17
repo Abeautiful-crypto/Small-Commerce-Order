@@ -107,7 +107,7 @@ var tableComments = []struct{ table, comment string }{
 	{"addresses", "收货地址：每人最多 10 个、默认唯一，下单时快照进订单"},
 	{"meta", "元数据：全局序号 seq、schema_version 等键值"},
 	{"users", "买家账号表：手机号登录，PBKDF2 密码哈希 + 随机盐"},
-	{"staff", "员工账号表：运营/仓库/客服，role 决定登录后落地页"},
+	{"staff", "员工账号表：运营/仓库/客服/管理员，role 决定登录后落地页与可见菜单"},
 	{"tx_guard", "全局写事务串行化行锁：写事务先 SELECT ... FOR UPDATE 此行"},
 }
 

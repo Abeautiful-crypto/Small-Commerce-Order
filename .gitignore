@@ -27,3 +27,6 @@ __pycache__/
 # 运营上传的商品图片（运行时数据，不提交）
 /web/uploads/
 
+
+# 原型设计稿（静态 HTML，不进产物）
+/web/design/

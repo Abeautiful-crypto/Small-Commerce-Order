@@ -11,8 +11,9 @@ type Role string
 const (
 	RoleBuyer     Role = "buyer"     // 买家：仅能操作自己的订单
 	RoleOps       Role = "ops"       // 运营：商品上下架、对账核查，不能改订单状态
-	RoleWarehouse Role = "warehouse" // 仓库：登记发货（一次）
+	RoleWarehouse Role = "warehouse" // 仓库：登记发货（一次）、给商品加库存
 	RoleCS        Role = "cs"        // 客服：审核退款、处理迟到支付
+	RoleAdmin     Role = "admin"     // 管理员：可查看/操作全部 B 端功能，并维护 B 端员工账号
 	RoleChannel   Role = "channel"   // 模拟支付渠道（仅内部使用）
 )
 

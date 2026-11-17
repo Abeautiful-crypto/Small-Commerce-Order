@@ -45,7 +45,7 @@ const maxChatRunes = 500
 //   - 其它角色无权访问
 func (s *Service) ChatThreads(actor model.Actor) ([]*ChatThread, error) {
 	switch actor.Role {
-	case model.RoleBuyer, model.RoleCS:
+	case model.RoleBuyer, model.RoleCS, model.RoleAdmin:
 	default:
 		return nil, forbidden("无权访问会话列表")
 	}
@@ -151,7 +151,7 @@ func requireChatAccess(actor model.Actor, st *model.State, orderID string) error
 	switch actor.Role {
 	case model.RoleBuyer:
 		return requireOwner(actor, o)
-	case model.RoleCS:
+	case model.RoleCS, model.RoleAdmin:
 		return nil
 	default:
 		return forbidden("无权访问：只有买家本人与客服可以进入订单会话")

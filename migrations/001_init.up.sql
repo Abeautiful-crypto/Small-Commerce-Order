@@ -193,7 +193,7 @@ CREATE TABLE IF NOT EXISTS staff (
   salt          VARCHAR(64)  NOT NULL,
   created_at    DATETIME(3)  NOT NULL,
   INDEX idx_staff_role (role)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='员工账号表：运营/仓库/客服，role 决定登录后落地页';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='员工账号表：运营/仓库/客服/管理员，role 决定登录后落地页与可见菜单';
 
 -- 全局写事务串行化行锁：所有跨表写事务先 SELECT ... FOR UPDATE 此行
 CREATE TABLE IF NOT EXISTS tx_guard (

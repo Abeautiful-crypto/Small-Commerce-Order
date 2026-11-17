@@ -738,16 +738,18 @@ func persistDiff(tx *sql.Tx, before, after *model.State) ([]string, error) {
 	for _, sh := range after.Shipments {
 		if seenShip[sh.ID] {
 			if b := before.ShipmentByOrder(sh.OrderID); b != nil && !same(b, sh) {
+				// signed_by 列为 NOT NULL DEFAULT ''：空签收人必须写空串，不能写 NULL（否则 Error 1048）
 				if _, err := tx.Exec(`UPDATE shipments SET signed_at=?,signed_by=? WHERE id=? AND signed_at IS NULL`,
-					tp(sh.SignedAt), nz(sh.SignedBy), sh.ID); err != nil {
+					tp(sh.SignedAt), sh.SignedBy, sh.ID); err != nil {
 					return nil, fmt.Errorf("回写签收信息失败 order=%s：%w", sh.OrderID, err)
 				}
 			}
 			continue
 		}
+		// signed_by 列为 NOT NULL DEFAULT ''：登记发货时还没有签收人，写空串而不是 NULL
 		if _, err := tx.Exec(`INSERT INTO shipments (id,order_id,carrier,tracking_no,created_at,operator,signed_at,signed_by)
 			VALUES (?,?,?,?,?,?,?,?)`, sh.ID, sh.OrderID, sh.Carrier, sh.TrackingNo, sh.CreatedAt, sh.Operator,
-			tp(sh.SignedAt), nz(sh.SignedBy)); err != nil {
+			tp(sh.SignedAt), sh.SignedBy); err != nil {
 			return nil, fmt.Errorf("发货登记冲突（对订单唯一）order=%s：%w", sh.OrderID, err)
 		}
 	}
