@@ -269,3 +269,40 @@ func TestUnit_CloseExpiredViaCandidates(t *testing.T) {
 		t.Fatalf("重复扫描不得产生流水：%d → %d", len(st0.Ledger), len(st1.Ledger))
 	}
 }
+
+// TestUnit_SalesCountOnPaid 验证「已售」只在支付成功后按数量递增：
+// 下单不占销量，支付成功 +qty；取消 / 超时关单不计入。
+func TestUnit_SalesCountOnPaid(t *testing.T) {
+	h := newHarness(t)
+	sales := func(productID string) int {
+		ps, err := h.svc.Products(ops)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range ps {
+			if p.ID == productID {
+				return p.Sales
+			}
+		}
+		t.Fatalf("商品 %s 不存在", productID)
+		return 0
+	}
+	before := sales("P2")
+	if before <= 0 {
+		t.Fatalf("演示商品 P2 应有初始销量，实际 %d", before)
+	}
+	o := h.createPaidOrder(t, buyer2, "P2", 2)
+	if got := sales("P2"); got != before+2 {
+		t.Fatalf("支付成功后销量应 %d，实际 %d", before+2, got)
+	}
+	// 未支付订单关闭：销量不变化
+	o2, err := h.svc.CreateOrder(buyer2, "P2", 1, "alipay", h.addr(buyer2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.svc.ForceExpire(cs, o2.ID)
+	if got := sales("P2"); got != before+2 {
+		t.Fatalf("未支付订单不应计入销量，期望 %d，实际 %d", before+2, got)
+	}
+	_ = o
+}

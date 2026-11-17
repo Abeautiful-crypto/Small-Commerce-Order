@@ -244,6 +244,10 @@ func (s *Service) HandlePaymentNotify(in model.PaymentIntent) (*model.NotifyResu
 			})
 			o.ChannelTxnID = in.ChannelTxnID
 			o.PaidAt = &now
+			// 支付成功即计销量：已售 = 历史销量 + 本次支付数量；退款不回退（业界通行口径）
+			if p := st.Product(o.ProductID); p != nil {
+				p.Sales += o.Qty
+			}
 			if err := model.Transition(o, model.StatusPendingShip, now); err != nil {
 				return err
 			}
