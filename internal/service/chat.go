@@ -142,6 +142,16 @@ func (s *Service) SendChat(actor model.Actor, orderID, kind, text string) (*mode
 	return out, nil
 }
 
+// CheckChatAccess 导出给 API 层：WebSocket 订阅订单会话前校验权限，
+// 与 HTTP 拉取消息走同一条 requireChatAccess 规则。
+func (s *Service) CheckChatAccess(actor model.Actor, orderID string) error {
+	st, err := s.snapshot()
+	if err != nil {
+		return err
+	}
+	return requireChatAccess(actor, st, orderID)
+}
+
 // requireChatAccess 会话访问校验：买家只能碰自己的订单，客服可碰全部，其它角色拒绝。
 func requireChatAccess(actor model.Actor, st *model.State, orderID string) error {
 	o := st.Order(orderID)

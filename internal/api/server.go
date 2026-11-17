@@ -29,6 +29,7 @@ type Server struct {
 	passwordless bool              // 生产模式下免密码登录（仅演示/预览，仍签发会话令牌）
 	passwords    map[string]string // 手机号 → 密码（生产模式可选覆盖，由环境变量注入）
 	side         string            // 本实例托管的端：c=C端买家页 / b=B端工作台 / ""=不限制（测试与脚本）
+	hub          *ChatHub          // 聊天 WebSocket 在线连接表（实时推送 + 轮询兜底；双端共享同一实例）
 }
 
 func New(svc *service.Service, webDir string, c cache.Cache, accounts account.Repo) *Server {
@@ -38,7 +39,14 @@ func New(svc *service.Service, webDir string, c cache.Cache, accounts account.Re
 	if accounts == nil {
 		accounts = account.NewMemRepo()
 	}
-	return &Server{svc: svc, web: webDir, cache: c, accounts: accounts, passwords: map[string]string{}}
+	return &Server{svc: svc, web: webDir, cache: c, accounts: accounts, passwords: map[string]string{}, hub: NewChatHub()}
+}
+
+// WithChatHub 让本实例与另一端实例共用同一张在线连接表：
+// 双端口各自独立 Server，但买家与客服的实时消息必须互通。
+func (s *Server) WithChatHub(h *ChatHub) *Server {
+	s.hub = h
+	return s
 }
 
 // WithSecurity 启用生产模式。demo 模式（默认）保持「选角色即登录」以便验收与演示。
@@ -182,19 +190,31 @@ func (s *Server) h(fn func(*http.Request) (any, error)) http.HandlerFunc {
 	}
 }
 
+// actorFromToken 用会话令牌还原身份（sess:{token} → 账号表校验），
+// 供 HTTP 头（actorFrom）与 WebSocket 握手 query（actorFromQuery）共用。
+// 令牌里的角色必须与账号表一致，账号被改角色后旧令牌立即失效。
+func (s *Server) actorFromToken(token string) (model.Actor, bool) {
+	if token == "" {
+		return model.Actor{}, false
+	}
+	role, uid, ok := s.cache.LoadSession(token)
+	if !ok {
+		return model.Actor{}, false
+	}
+	if acc, valid := s.accounts.Find(uid); valid && string(acc.Role) == role {
+		return model.Actor{Role: acc.Role, UserID: acc.ID, Name: acc.Name}, true
+	}
+	return model.Actor{}, false
+}
+
 // actorFrom 优先用 sess:{token} 登录态还原身份（Redis），失败回退到请求头；
 // 名字始终由服务端账号表给出，前端无法伪造。
 func (s *Server) actorFrom(r *http.Request) model.Actor {
-	if token := r.Header.Get("X-Token"); token != "" {
-		if role, uid, ok := s.cache.LoadSession(token); ok {
-			// 令牌里的角色必须与账号表一致，账号被改角色后旧令牌立即失效
-			if acc, valid := s.accounts.Find(uid); valid && string(acc.Role) == role {
-				return model.Actor{Role: acc.Role, UserID: acc.ID, Name: acc.Name}
-			}
-		}
-		if s.production {
-			return model.Actor{} // 生产模式：无效令牌直接拒绝，绝不回退
-		}
+	if actor, ok := s.actorFromToken(r.Header.Get("X-Token")); ok {
+		return actor
+	}
+	if r.Header.Get("X-Token") != "" && s.production {
+		return model.Actor{} // 生产模式：无效令牌直接拒绝，绝不回退
 	}
 	if s.production {
 		return model.Actor{} // 生产模式：必须携带有效 X-Token
@@ -494,6 +514,9 @@ func (s *Server) Handler() http.Handler {
 	}))
 
 	// ---------- 订单客服会话 ----------
+	// WebSocket 实时通道（字面量路径优先于下面的 {orderId} 通配）；
+	// 消息收发 HTTP 接口保留作为断线兜底。
+	mux.HandleFunc("GET /api/chat/ws", s.serveChatWS)
 	mux.HandleFunc("GET /api/chat/threads", s.h(func(r *http.Request) (any, error) {
 		return s.svc.ChatThreads(s.actorFrom(r))
 	}))
@@ -508,7 +531,13 @@ func (s *Server) Handler() http.Handler {
 		if err := decodeBody(r, &req); err != nil {
 			return nil, err
 		}
-		return s.svc.SendChat(s.actorFrom(r), r.PathValue("orderId"), req.Kind, req.Text)
+		m, err := s.svc.SendChat(s.actorFrom(r), r.PathValue("orderId"), req.Kind, req.Text)
+		if err != nil {
+			return nil, err
+		}
+		// HTTP 兜底路径发出的消息同样实时推给 WS 在线的订阅者；离线者由轮询兜底
+		s.hub.broadcastChat(r.PathValue("orderId"), m, nil)
+		return m, nil
 	}))
 
 	// ---------- 订单 ----------

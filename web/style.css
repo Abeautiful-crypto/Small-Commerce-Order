@@ -1465,3 +1465,10 @@ select.select-button { appearance: none; -webkit-appearance: none; cursor: point
   .range-tabs button { flex: 1 0 auto; text-align: center; }
   .chart-area { height: 180px; grid-template-columns: 38px 1fr; padding: 4px 12px 0; }
 }
+
+/* ===== 聊天弹窗：实时通道状态标签 ===== */
+.ws-state {
+  font-style: normal; font-size: 8px; padding: 2px 7px; border-radius: 8px;
+  margin-left: 6px; background: #f1f0e6; color: #8a8264; white-space: nowrap;
+}
+.ws-state.on { background: #e6f2ea; color: #2c674f; }

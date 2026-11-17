@@ -332,6 +332,123 @@ function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) pollOnce(); });
 window.addEventListener('focus', () => { pollOnce(); });
 
+/* ================= 聊天 WebSocket：实时通道 + 轮询兜底 ================= */
+// WS 正常时：聊天弹窗的消息实时推送到达，4 秒轮询停掉；
+// WS 断开时：自动指数退避重连，期间恢复原有轮询，收发回退到 HTTP 接口。
+let chatWS = null;
+let chatWSOk = false;
+let chatWSRetry = 0;
+let chatWSReconn = null;
+let wsSeq = 0;
+const wsPending = {}; // ref → 发送时的输入框内容，收到 sent 回执后才清空输入框
+
+function chatWSReady() { return !!(chatWS && chatWS.readyState === WebSocket.OPEN); }
+function wsSend(obj) {
+  if (!chatWSReady()) return false;
+  try { chatWS.send(JSON.stringify(obj)); return true; } catch (e) { return false; }
+}
+function chatWSUrl() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const q = new URLSearchParams();
+  if (current && current.token) q.set('token', current.token);
+  if (current) { q.set('role', current.role); q.set('uid', current.id); }
+  return `${proto}://${location.host}/api/chat/ws?${q.toString()}`;
+}
+function connectChatWS() {
+  if (!current || chatWS) return;
+  let ws;
+  try { ws = new WebSocket(chatWSUrl()); } catch (e) { scheduleWSReconnect(); return; }
+  chatWS = ws;
+  ws.onopen = () => {
+    chatWSOk = true; chatWSRetry = 0;
+    if (chatOrder) wsSend({ type: 'sub', orderId: chatOrder }); // 重连后恢复订阅
+    syncChatFallback();
+  };
+  ws.onmessage = (ev) => {
+    let d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    handleChatWSMsg(d);
+  };
+  ws.onclose = () => { chatWS = null; chatWSOk = false; syncChatFallback(); scheduleWSReconnect(); };
+  ws.onerror = () => { try { ws.close(); } catch (e) { /* onclose 会接手 */ } };
+}
+function scheduleWSReconnect() {
+  if (!current || chatWSReconn) return;
+  const delay = Math.min(15000, 1000 * Math.pow(2, chatWSRetry++));
+  chatWSReconn = setTimeout(() => { chatWSReconn = null; connectChatWS(); }, delay);
+}
+function stopChatWS() {
+  if (chatWSReconn) { clearTimeout(chatWSReconn); chatWSReconn = null; }
+  if (chatWS) { chatWS.onclose = null; try { chatWS.close(); } catch (e) { /* 忽略 */ } chatWS = null; }
+  chatWSOk = false;
+}
+// 保证「WS 活着 → 弹窗轮询停；WS 断 → 弹窗轮询跑」的状态一致
+function syncChatFallback() {
+  if (chatWSOk) {
+    if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
+  } else if (chatOrder && !chatTimer) {
+    chatTimer = setInterval(loadChat, 4000);
+  }
+  updateWsState();
+}
+// 弹窗头部的通道状态小标签：实时 / 轮询，让兜底切换可见
+function updateWsState() {
+  const el = $('#wsState');
+  if (el) {
+    el.textContent = chatWSOk ? '实时通道' : '轮询模式';
+    el.className = 'ws-state' + (chatWSOk ? ' on' : '');
+  }
+}
+// 服务端事件分发
+async function handleChatWSMsg(d) {
+  switch (d.type) {
+    case 'chat': {
+      // 新消息实时到达：弹窗开着就直接追加，无需等 4 秒轮询
+      if (chatOrder && d.orderId === chatOrder) appendChatMsg(d.msg);
+      break;
+    }
+    case 'threads_dirty': {
+      // 会话列表变化：静默拉一次 threads，更新徽标与列表（不重绘弹窗，避免打断输入）
+      try {
+        db.threads = (await api('/api/chat/threads')) || [];
+        updateChatBadge();
+        if (current.role === 'buyer') syncBuyerChatNotice(false);
+        if (current.role === 'cs' && !document.querySelector('.modal-backdrop')) render();
+      } catch (e) { /* 拉取失败下一轮兜底轮询会补上 */ }
+      break;
+    }
+    case 'sent': {
+      const text = wsPending[d.ref];
+      delete wsPending[d.ref];
+      const input = $('#chatInput');
+      // 只在输入框仍是这条消息原文时清空，避免误删用户正在输入的新内容
+      if (text != null && input && input.value.trim() === text.trim()) input.value = '';
+      if (chatOrder && d.orderId === chatOrder && d.msg) appendChatMsg(d.msg);
+      break;
+    }
+    case 'send_error': {
+      delete wsPending[d.ref];
+      toast('发送失败：' + (d.message || '未知错误'), 3200);
+      break;
+    }
+    case 'sub_ok': break;
+    case 'error': toast(d.message || '聊天通道异常', 3200); break;
+    default: break;
+  }
+}
+// 把 WS 推来的消息追加进聊天弹窗（按消息 ID 去重，轮询全量刷新也会重建同 ID 行）
+function appendChatMsg(m) {
+  if (!m || !m.id) return;
+  const box = $('#chatBody');
+  if (!box || (chatOrder && m.orderId !== chatOrder)) return;
+  if (box.querySelector(`[data-mid="${CSS.escape(m.id)}"]`)) return;
+  if (box.querySelector('.empty-state')) box.innerHTML = '';
+  box.insertAdjacentHTML('beforeend', chatBubble(m));
+  box.scrollTop = box.scrollHeight;
+  markChatRead(m.orderId || chatOrder, m.createdAt);
+  updateChatBadge();
+}
+
 /* ================= 登录 ================= */
 // 登录页只提供「账号 + 密码」两个输入框：角色由服务端账号表判定，
 // 前端既不能选角色，也拿不到任何账号清单。
@@ -418,7 +535,8 @@ async function loginAs(phone, password) {
   chatToastSeen = {};
   syncBuyerChatNotice(true); // 登录时静默登记未读，只有之后的新回复才弹提醒
   render();
-  startPolling(); // 登录后开启跨端实时同步
+  startPolling(); // 登录后开启跨端实时同步（兜底轮询，聊天另走 WS 实时通道）
+  connectChatWS(); // 聊天 WebSocket：买家 / 客服实时收发，断线自动降级回轮询
   toast(`已登录：${ROLES[u.role] ? ROLES[u.role].label : u.role} · ${current.name}`);
 }
 function doLogin() {
@@ -442,7 +560,7 @@ function doLogin() {
   })();
 }
 function doLogout() {
-  stopHeroTimer(); stopPolling(); stopChatPoll();
+  stopHeroTimer(); stopPolling(); stopChatPoll(); stopChatWS();
   current = null; lastSnap = ''; closeModal(); renderLogin();
 }
 
@@ -1911,7 +2029,8 @@ function openOrderChat(orderId) {
   openModal(modalFrame('联系客服', 'headset', `
     <div class="chat-meta">
       <img src="${esc(o.productImage || '')}" alt=""/>
-      <div><b>${esc(o.productName || '订单')}</b><small class="mono">${esc(orderId)}</small></div>
+      <div><b>${esc(o.productName || '订单')}</b><small class="mono">${esc(orderId)}</small>
+        <em class="ws-state" id="wsState"></em></div>
       <span>${badge(o.status)}</span>
     </div>
     <div class="chat-body" id="chatBody"><div class="empty-state">加载中…</div></div>
@@ -1924,7 +2043,9 @@ function openOrderChat(orderId) {
     </div>`));
   chatOrder = orderId; // openModal 内部会 closeModal（顺带停轮询），因此必须在打开之后再赋值
   loadChat();
-  chatTimer = setInterval(loadChat, 4000);
+  // 实时优先：WS 在线只订阅推送、停掉 4 秒轮询；离线（或未连上）保持轮询兜底
+  if (chatWSOk) wsSend({ type: 'sub', orderId });
+  syncChatFallback();
 }
 function chatBubble(m) {
   const mine = current && m.fromId === current.id;
@@ -1932,7 +2053,7 @@ function chatBubble(m) {
     let c = {};
     try { c = JSON.parse(m.text); } catch (e) { c = {}; }
     const oid = c.orderId || m.orderId;
-    return `<div class="chat-row ${mine ? 'mine' : ''}">
+    return `<div class="chat-row ${mine ? 'mine' : ''}" data-mid="${esc(m.id || '')}">
       <div class="chat-order-card">
         <img src="${esc(c.productImage || '')}" alt=""/>
         <div><b>${esc(c.productName || '订单')}</b>
@@ -1942,7 +2063,7 @@ function chatBubble(m) {
       </div>
       <span class="chat-time">${esc(m.fromName)} · ${fmtRelTime(m.createdAt)}</span></div>`;
   }
-  return `<div class="chat-row ${mine ? 'mine' : ''}">
+  return `<div class="chat-row ${mine ? 'mine' : ''}" data-mid="${esc(m.id || '')}">
     <div class="chat-bubble">${esc(m.text)}</div>
     <span class="chat-time">${esc(m.fromName)} · ${fmtRelTime(m.createdAt)}</span></div>`;
 }
@@ -1962,11 +2083,17 @@ async function loadChat() {
     updateChatBadge();
   } catch (e) { /* 网络抖动时保持当前内容 */ }
 }
+// 发消息：WS 在线走实时通道（收到 sent 回执才清空输入框，失败有 send_error 提示）；
+// WS 离线或发送失败时回退到 HTTP POST（原有逻辑，轮询兜底刷新）。
 async function sendChatText() {
   const input = $('#chatInput');
   const text = ((input && input.value) || '').trim();
   if (!text) { toast('请先输入消息内容'); return; }
   if (!chatOrder) return;
+  if (wsSend({ type: 'send', orderId: chatOrder, kind: 'text', text, ref: ++wsSeq })) {
+    wsPending[wsSeq] = text;
+    return;
+  }
   try {
     await api(`/api/chat/${chatOrder}`, { method: 'POST', body: { kind: 'text', text } });
     if (input) input.value = '';
@@ -1977,6 +2104,10 @@ async function sendChatText() {
 }
 async function sendOrderCard() {
   if (!chatOrder) return;
+  if (wsSend({ type: 'send', orderId: chatOrder, kind: 'order', text: '', ref: ++wsSeq })) {
+    wsPending[wsSeq] = '';
+    return; // 卡片推送到达后弹窗内直接追加，无需再拉取
+  }
   try {
     await api(`/api/chat/${chatOrder}`, { method: 'POST', body: { kind: 'order' } });
     await loadChat();

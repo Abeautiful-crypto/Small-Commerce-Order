@@ -267,8 +267,10 @@ func Build(cfg *Config, openRedis redisOpener) (*Stack, error) {
 	stack.Service = service.New(st, cfg.Secret, nil).WithCache(c)
 
 	// 两个端各自一个 Server 实例：共享服务、缓存与账号表，但登录端与首页不同。
+	// 聊天 WebSocket 的在线连接表也共享：买家连 C 端、客服连 B 端，消息才能互推。
+	hub := api.NewChatHub()
 	newServer := func(side string) *api.Server {
-		srv := api.New(stack.Service, cfg.Web, c, accounts).WithSide(side)
+		srv := api.New(stack.Service, cfg.Web, c, accounts).WithSide(side).WithChatHub(hub)
 		if production {
 			srv = srv.WithSecurity(cfg.Passwords)
 			if cfg.Passwordless {
