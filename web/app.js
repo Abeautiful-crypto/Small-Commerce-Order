@@ -1196,9 +1196,10 @@ function renderBusiness() {
     '员工管理': () => renderStaffAdmin(),
   };
   const body = pages[bizPage] ? pages[bizPage]() : '<div class="empty-state">页面不存在</div>';
-  const roleLabelOf = (r) => r === 'ops' ? '运营专员'
-    : r === 'warehouse' ? '仓库管理员'
-      : r === 'admin' ? '管理员' : '售后客服';
+  // 角色标注用短名，避免与账号姓名（如「仓库管理员」）重复出现同一串文字
+  const roleChip = (r) => r === 'ops' ? '运营'
+    : r === 'warehouse' ? '仓库'
+      : r === 'admin' ? '管理员' : '客服';
   return `
   <main class="business-page">
     <aside class="sidebar">
@@ -1215,10 +1216,15 @@ function renderBusiness() {
       <header class="workspace-header">
         <div><span class="eyebrow">WORKSPACE</span><h1>${esc(bizPage)}</h1></div>
         <div class="header-tools">
-          <button class="role-badge" title="点击退出登录" onclick="confirmLogout()">
+          <div class="user-card" title="当前登录账号">
             <span class="role-avatar ${role === 'cs' ? 'service' : role}">${icon(metaR.icon, 18)}</span>
-            <span><b>${esc(current.name)}</b><small>${esc(roleLabelOf(role))}</small></span>
-            <span class="role-exit">${icon('logout', 15)}</span>
+            <span class="user-card-meta">
+              <b>${esc(current.name || roleChip(role))}</b>
+              <i class="role-tag ${esc(role)}">${esc(roleChip(role))}</i>
+            </span>
+          </div>
+          <button class="logout-btn" onclick="confirmLogout()" title="退出当前账号">
+            ${icon('logout', 16)}<span>退出登录</span>
           </button>
         </div>
       </header>
@@ -1229,8 +1235,9 @@ function renderBusiness() {
 
 /* ---------- 运营：概览 ---------- */
 function dayKey(t) { const d = new Date(t); const p = (n) => String(n).padStart(2, '0'); return `${p(d.getMonth() + 1)}/${p(d.getDate())}`; }
-// 统计区间：近一周 / 本月 / 上个月 / 今年 / 去年（KPI 与趋势图共用同一口径）
+// 统计区间：近三天 / 近一周 / 本月 / 上个月 / 今年 / 去年（KPI 与趋势图共用同一口径）
 const STAT_RANGES = [
+  { key: '3d', label: '近三天' },
   { key: '7d', label: '近一周' },
   { key: 'month', label: '本月' },
   { key: 'lastMonth', label: '上个月' },
@@ -1243,23 +1250,25 @@ function trendRangeLabel() {
   return r ? r.label : '近一周';
 }
 // rangeOf 返回区间 [from, to) 与分桶单位（日 / 月）
+// 关键点：本月只算到「今天」，不把未来的日期画进图里
 function rangeOf(key) {
   const now = new Date();
   const y = now.getFullYear();
   const m = now.getMonth();
-  if (key === 'month') return { from: new Date(y, m, 1), to: new Date(y, m + 1, 1), unit: 'day' };
-  if (key === 'lastMonth') return { from: new Date(y, m - 1, 1), to: new Date(y, m, 1), unit: 'day' };
-  if (key === 'year') return { from: new Date(y, 0, 1), to: new Date(y + 1, 0, 1), unit: 'month' };
-  if (key === 'lastYear') return { from: new Date(y - 1, 0, 1), to: new Date(y, 0, 1), unit: 'month' };
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  if (key === 'month') return { from: new Date(y, m, 1), to: tomorrow, unit: 'day' };
+  if (key === 'lastMonth') return { from: new Date(y, m - 1, 1), to: new Date(y, m, 1), unit: 'day' };
+  if (key === 'year') return { from: new Date(y, 0, 1), to: tomorrow, unit: 'month' };
+  if (key === 'lastYear') return { from: new Date(y - 1, 0, 1), to: new Date(y, 0, 1), unit: 'month' };
+  const span = key === '3d' ? 3 : 7;
   const from = new Date(today);
-  from.setDate(from.getDate() - 6);
-  const to = new Date(today);
-  to.setDate(to.getDate() + 1);
-  return { from, to, unit: 'day' };
+  from.setDate(from.getDate() - (span - 1));
+  return { from, to: tomorrow, unit: 'day' };
 }
-// rangeBuckets 生成柱状图的分桶：日区间按天，年区间按月
+// rangeBuckets 生成柱状图的分桶：日区间按天，年区间按月（12 根不会挤）
 function rangeBuckets(key) {
   const { from, to, unit } = rangeOf(key);
   const out = [];
@@ -1274,7 +1283,11 @@ function rangeBuckets(key) {
     return out;
   }
   for (let d = new Date(from); d < to; d.setDate(d.getDate() + 1)) {
-    out.push({ start: new Date(d), end: new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1), label: dayKey(d) });
+    out.push({
+      start: new Date(d),
+      end: new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1),
+      label: `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, '0')}`,
+    });
   }
   return out;
 }
@@ -1311,17 +1324,27 @@ function renderOpsOverview() {
     return { plus, minus, net: Math.max(0, plus - minus) };
   });
   const maxV = Math.max(1, ...bucketRows.map((r) => r.net));
-  const labelStep = Math.max(1, Math.ceil(buckets.length / 7));
+  // 标签抽稀：12 个以内全显示（如 7 天 / 12 个月），更长的日区间按 6 等分取点，首尾必留
+  const labelStep = buckets.length <= 12 ? 1 : Math.ceil(buckets.length / 6);
+  const lastIdx = buckets.length - 1;
   const bars = buckets.map((b, i) => {
-    const show = i === buckets.length - 1 || i % labelStep === 0;
+    const r = bucketRows[i];
+    // 末尾标签必留；若上一个标签离末尾太近则让位，避免两个日期挤在一起
+    const show = labelStep === 1 || i === lastIdx
+      || (i % labelStep === 0 && lastIdx - i >= 2);
     return `
-    <div title="${b.label} 净收款 ¥${formatYuan(bucketRows[i].net)}（收款 ¥${formatYuan(bucketRows[i].plus)} − 退款 ¥${formatYuan(bucketRows[i].minus)}）">
-      <span style="height:${bucketRows[i].net > 0 ? Math.max(4, Math.round(bucketRows[i].net / maxV * 100)) : 0}%"></span>
-      <small>${show ? b.label : ''}</small>
+    <div class="bar-col" title="${b.label} 净收款 ¥${formatYuan(r.net)}（收款 ¥${formatYuan(r.plus)} − 退款 ¥${formatYuan(r.minus)}）">
+      <div class="bar-track"><span class="bar-fill${r.net > 0 ? '' : ' zero'}"${r.net > 0 ? ` style="height:${Math.max(3, Math.round(r.net / maxV * 100))}%"` : ''}></span></div>
+      <small class="${show ? '' : 'hide'}">${esc(b.label)}</small>
     </div>`;
   }).join('');
   const yMax = Math.ceil(maxV / 10000) * 10000 || 10000;
   const chartY = [4, 3, 2, 1, 0].map((i) => `<span>¥${formatYuan(yMax * i / 4)}</span>`).join('');
+  // 有流水的桶数量：零值天画淡灰基线，避免「图里没东西 = 数据丢了」的误解
+  const activeBuckets = bucketRows.filter((r) => r.plus > 0 || r.minus > 0).length;
+  const activeText = activeBuckets === 0
+    ? '该区间暂无流水'
+    : `其中 ${activeBuckets} ${rangeOf(trendRange).unit === 'month' ? '个月' : '天'}有流水`;
   const lowStock = db.products.filter((p) => p.available <= 2).length;
   return `
   <div class="metric-grid">
@@ -1333,12 +1356,13 @@ function renderOpsOverview() {
   <div class="dashboard-grid">
     <section class="panel sales-panel">
       <div class="panel-heading">
-        <div><h2>净收款走势</h2><p>${esc(rangeLabel)}按${rangeOf(trendRange).unit === 'month' ? '月' : '日'}统计，等于收款减退款</p></div>
-        <select class="select-button" aria-label="选择统计区间"
-          onchange="pickTrend(this.value)">${STAT_RANGES.map((r) => `<option value="${r.key}"${r.key === trendRange ? ' selected' : ''}>${r.label}</option>`).join('')}</select>
+        <div><h2>净收款走势</h2><p>${esc(rangeLabel)}按${rangeOf(trendRange).unit === 'month' ? '月' : '日'}聚合 · ${activeText}</p></div>
+        <div class="range-tabs" role="tablist" aria-label="选择统计区间">
+          ${STAT_RANGES.map((r) => `<button role="tab" aria-selected="${r.key === trendRange}" class="${r.key === trendRange ? 'active' : ''}" onclick="pickTrend('${r.key}')">${r.label}</button>`).join('')}
+        </div>
       </div>
       <div class="chart-area"><div class="chart-y">${chartY}</div><div class="bars">${bars}</div></div>
-      <div class="chart-legend"><span><i class="income"></i>净收款（收款 − 退款）</span><span>退款金额见上方第三张卡片</span></div>
+      <div class="chart-legend"><span><i class="income"></i>净收款（收款 − 退款）</span><span>淡灰短条表示当天没有流水</span></div>
     </section>
     <section class="panel">
       <div class="panel-heading"><div><h2>库存健康度</h2><p>商品可售库存实时状态</p></div></div>
