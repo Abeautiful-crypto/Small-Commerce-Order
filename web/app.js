@@ -116,6 +116,8 @@ function icon(name, size = 20) {
     user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
     bag: '<path d="M5 8h14l-1 13H6z"/><path d="M9 8a3 3 0 0 1 6 0"/>',
+    // 购物车：带轮子的经典造型，缩到 16px 也不会被看成垃圾桶
+    cart: '<circle cx="9.5" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M3 4h2.3l2.5 10.5h10.4L20.6 7H6.1"/>',
     chevron: '<path d="m9 18 6-6-6-6"/>',
     arrow: '<path d="m5 12 14 0m-5-5 5 5-5 5"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
@@ -590,7 +592,8 @@ function shopCards(list) {
         <p class="old-price">¥${formatYuan(p.oldPriceFen)}</p>
         <div class="product-bottom">
           <strong>¥${formatYuan(p.priceFen)}</strong>
-          <button onclick="openBuySheet('${esc(p.id)}')" ${p.onSale && p.available > 0 ? '' : 'disabled'}>${icon('bag', 18)}</button>
+          <button class="buy-now" onclick="openBuySheet('${esc(p.id)}')"
+            aria-label="购买 ${esc(p.name)}" ${p.onSale && p.available > 0 ? '' : 'disabled'}>${icon('cart', 16)}<span>购买</span></button>
         </div>
       </div>
     </article>`).join('');
